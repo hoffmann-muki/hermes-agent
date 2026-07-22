@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Protocol, Sequence
 
 import httpx
 
@@ -137,6 +137,26 @@ class InferenceOptions:
     source_identity: dict[str, Any] | None = None
 
 
+class SourceIdentityOptions(Protocol):
+    source_identity: dict[str, Any] | None
+
+
+class WorkerOptions(SourceIdentityOptions, Protocol):
+    run_id: str
+    include_hints: bool
+    model: str
+    docker_platform: str
+    agent_timeout_seconds: int
+    setup_timeout_seconds: int
+
+
+class WorkerRow(Protocol):
+    instance_id: str
+    base_commit: str
+
+    def public_dict(self) -> dict[str, str]: ...
+
+
 @dataclass(frozen=True)
 class RunPaths:
     run_dir: Path
@@ -239,13 +259,14 @@ def validate_instance_id(instance_id: str) -> None:
     if (
         len(parts) != 2
         or not all(parts)
+        or any(part in {".", ".."} for part in parts)
         or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", part) for part in parts)
     ):
         raise BenchmarkError(f"Invalid SWE-bench instance id: {instance_id}")
 
 
 def validate_run_id(run_id: str) -> None:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id):
+    if run_id in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id):
         raise BenchmarkError(
             "Run id must contain only letters, numbers, dots, underscores, and hyphens"
         )
@@ -464,6 +485,7 @@ def run_command(
     cwd: Path | None = None,
     timeout: int | None = None,
     env: dict[str, str] | None = None,
+    umask: int = -1,
 ) -> CommandResult:
     try:
         completed = subprocess.run(
@@ -475,6 +497,7 @@ def run_command(
             timeout=timeout,
             check=False,
             stdin=subprocess.DEVNULL,
+            umask=umask,
         )
     except subprocess.TimeoutExpired as exc:
         raise BenchmarkError(f"Command timed out: {' '.join(args)}") from exc
@@ -616,10 +639,7 @@ def hermes_source_identity() -> dict[str, Any]:
         or not all(item.returncode == 0 for item in (revision, diff, untracked))
     ):
         digest = hashlib.sha256()
-        for path in (
-            Path(__file__),
-            Path(__file__).with_name("swebench_verified_worker.py"),
-        ):
+        for path in sorted(Path(__file__).parent.glob("swebench*.py")):
             try:
                 digest.update(path.read_bytes())
             except OSError:
@@ -652,7 +672,7 @@ def hermes_source_identity() -> dict[str, Any]:
     }
 
 
-def _source_identity_for_options(options: InferenceOptions) -> dict[str, Any]:
+def _source_identity_for_options(options: SourceIdentityOptions) -> dict[str, Any]:
     return validate_source_identity(options.source_identity or hermes_source_identity())
 
 
@@ -676,7 +696,7 @@ def validate_source_identity(value: Any) -> dict[str, Any]:
     }
 
 
-def require_unchanged_source(options: InferenceOptions) -> None:
+def require_unchanged_source(options: SourceIdentityOptions) -> None:
     expected = _source_identity_for_options(options)
     if hermes_source_identity() != expected:
         raise BenchmarkError(
@@ -758,14 +778,19 @@ def _wait_for_worker(
 
 
 def _capture_patch_from_container(
-    container_id: str, base_commit: str
+    container_id: str,
+    base_commit: str,
+    *,
+    worktree: str = "/testbed",
 ) -> tuple[str, list[str], str | None]:
     if not re.fullmatch(r"[0-9a-f]{12,64}", container_id):
         return "", [], "invalid benchmark container id"
+    if worktree not in {"/app", "/testbed"}:
+        return "", [], "invalid benchmark worktree"
     script = (
-        "git config --global --add safe.directory /testbed && "
-        "git -C /testbed add -A -- . && "
-        f"git -C /testbed diff --cached --binary --no-color {base_commit} -- ."
+        f"git config --global --add safe.directory {worktree} && "
+        f"git -C {worktree} add -A -- . && "
+        f"git -C {worktree} diff --cached --binary --no-color {base_commit} -- ."
     )
     try:
         patch = run_command(
@@ -773,7 +798,7 @@ def _capture_patch_from_container(
                 "docker",
                 "exec",
                 "--workdir",
-                "/testbed",
+                worktree,
                 container_id,
                 "bash",
                 "-c",
@@ -787,11 +812,11 @@ def _capture_patch_from_container(
                 "docker",
                 "exec",
                 "--workdir",
-                "/testbed",
+                worktree,
                 container_id,
                 "bash",
                 "-c",
-                f"git -C /testbed diff --cached --name-only -z {base_commit} -- .",
+                f"git -C {worktree} diff --cached --name-only -z {base_commit} -- .",
             ],
             timeout=30,
             env=_docker_cli_environment(),
@@ -982,11 +1007,16 @@ def _redact_worker_logs(paths: Sequence[Path], secret: str) -> list[str]:
 
 
 def _run_worker(
-    options: InferenceOptions,
-    row: SweBenchRow,
+    options: WorkerOptions,
+    row: WorkerRow,
     instance_dir: Path,
     image: str,
     image_metadata: dict[str, Any],
+    *,
+    benchmark: str = BENCHMARK,
+    worker_module: str = "hermes_cli.benchmarks.swebench_verified_worker",
+    prompt_builder: Callable[..., str] = build_prompt,
+    worktree: str = "/testbed",
 ) -> dict[str, Any]:
     instance_dir.mkdir(parents=True, exist_ok=True)
     worker_home = instance_dir / "hermes-home"
@@ -1002,13 +1032,13 @@ def _run_worker(
         sandbox_path / "workspace",
     ):
         path.mkdir(parents=True, mode=0o700, exist_ok=True)
-    prompt = build_prompt(row, options.include_hints)
+    prompt = prompt_builder(row, options.include_hints)
     atomic_write_text(instance_dir / "prompt.md", prompt)
     atomic_write_json(
         request_path,
         {
             "schemaVersion": 1,
-            "benchmark": BENCHMARK,
+            "benchmark": benchmark,
             "row": row.public_dict(),
             "prompt": prompt,
             "includeHints": options.include_hints,
@@ -1030,7 +1060,7 @@ def _run_worker(
     command = [
         sys.executable,
         "-m",
-        "hermes_cli.benchmarks.swebench_verified_worker",
+        worker_module,
         "--request",
         str(request_path),
     ]
@@ -1129,9 +1159,16 @@ def _run_worker(
                         container_restart_error,
                     )
                 else:
-                    patch, changed_paths, capture_error = _capture_patch_from_container(
-                        container_id, row.base_commit
-                    )
+                    if worktree == "/testbed":
+                        patch, changed_paths, capture_error = (
+                            _capture_patch_from_container(container_id, row.base_commit)
+                        )
+                    else:
+                        patch, changed_paths, capture_error = (
+                            _capture_patch_from_container(
+                                container_id, row.base_commit, worktree=worktree
+                            )
+                        )
             except BaseException as exc:
                 remember_controller_error(exc)
                 patch, changed_paths, capture_error = (

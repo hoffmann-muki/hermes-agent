@@ -14,9 +14,10 @@ import shlex
 import signal
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 import yaml
 
@@ -110,6 +111,62 @@ PHASE_TOOL_SCHEMA: dict[str, Any] = {
     },
 }
 
+WORKER_BENCHMARK: str = BENCHMARK
+ROW_PARSER = parse_swebench_row
+PHASE_PROMPT_BUILDER: Callable[..., str]
+
+
+@contextmanager
+def worker_configuration(
+    *,
+    benchmark: str,
+    worktree: str,
+    conda_activation: str,
+    row_parser: Callable[[Any], Any],
+    coordinator_system_prompt: str,
+    phase_system_prompts: dict[str, str],
+    phase_tool_schema: dict[str, Any],
+    phase_prompt_builder: Callable[..., str],
+) -> Iterator[None]:
+    """Temporarily specialize this process-isolated benchmark worker."""
+    if worktree not in {"/app", "/testbed"}:
+        raise BenchmarkError(f"Unsupported benchmark worktree: {worktree}")
+    global WORKER_BENCHMARK, WORKTREE, CONDA_ACTIVATION, ROW_PARSER
+    global COORDINATOR_SYSTEM_PROMPT, PHASE_SYSTEM_PROMPTS, PHASE_TOOL_SCHEMA
+    global PHASE_PROMPT_BUILDER
+
+    previous = (
+        WORKER_BENCHMARK,
+        WORKTREE,
+        CONDA_ACTIVATION,
+        ROW_PARSER,
+        COORDINATOR_SYSTEM_PROMPT,
+        PHASE_SYSTEM_PROMPTS,
+        PHASE_TOOL_SCHEMA,
+        PHASE_PROMPT_BUILDER,
+    )
+    WORKER_BENCHMARK = benchmark
+    WORKTREE = worktree
+    CONDA_ACTIVATION = conda_activation
+    ROW_PARSER = row_parser
+    COORDINATOR_SYSTEM_PROMPT = coordinator_system_prompt
+    PHASE_SYSTEM_PROMPTS = phase_system_prompts
+    PHASE_TOOL_SCHEMA = phase_tool_schema
+    PHASE_PROMPT_BUILDER = phase_prompt_builder
+    try:
+        yield
+    finally:
+        (
+            WORKER_BENCHMARK,
+            WORKTREE,
+            CONDA_ACTIVATION,
+            ROW_PARSER,
+            COORDINATOR_SYSTEM_PROMPT,
+            PHASE_SYSTEM_PROMPTS,
+            PHASE_TOOL_SCHEMA,
+            PHASE_PROMPT_BUILDER,
+        ) = previous
+
 
 def _redact(value: Any, secret: str) -> Any:
     if isinstance(value, str):
@@ -166,7 +223,7 @@ def _terminal_config(request: dict[str, Any]) -> dict[str, Any]:
             # One means one provider attempt: Hermes' application-level retry
             # loop performs no retry after a failed model request.
             "api_max_retries": DEFAULT_API_MAX_RETRIES,
-            # /testbed exists only inside Docker. Without this override,
+            # The benchmark worktree exists only inside Docker. Without this override,
             # context discovery can fall back to the host Hermes checkout and
             # inject irrelevant repository state into the benchmark prompt.
             "coding_context": DEFAULT_CODING_CONTEXT,
@@ -220,10 +277,10 @@ def setup_environment(request: dict[str, Any]) -> Any:
         task_id, {"docker_image": request["image"], "cwd": WORKTREE}
     )
     base_commit = request["row"]["base_commit"]
+    activation = f"{CONDA_ACTIVATION} && " if CONDA_ACTIVATION else ""
     command = (
-        f"{CONDA_ACTIVATION} && "
-        "git config --global --add safe.directory /testbed && "
-        f"git -C /testbed reset --hard {shlex.quote(base_commit)}"
+        f"{activation}git config --global --add safe.directory {WORKTREE} && "
+        f"git -C {WORKTREE} reset --hard {shlex.quote(base_commit)}"
     )
     raw = terminal_tool(
         command=command,
@@ -238,7 +295,8 @@ def setup_environment(request: dict[str, Any]) -> Any:
         raise BenchmarkError("Hermes terminal setup returned invalid JSON") from exc
     if result.get("exit_code") != 0:
         raise BenchmarkError(
-            f"Could not initialize /testbed: {result.get('error') or result.get('output')}"
+            f"Could not initialize {WORKTREE}: "
+            f"{result.get('error') or result.get('output')}"
         )
     env = get_active_env(task_id)
     if env is None:
@@ -249,7 +307,7 @@ def setup_environment(request: dict[str, Any]) -> Any:
 def _status(env: Any) -> str:
     result = _execute(
         env,
-        "git -C /testbed status --porcelain=v1 --untracked-files=all",
+        f"git -C {WORKTREE} status --porcelain=v1 --untracked-files=all",
         timeout=30,
     )
     _require_success(result, "git status")
@@ -259,8 +317,8 @@ def _status(env: Any) -> str:
 def _reset_worktree(env: Any, base_commit: str) -> None:
     result = _execute(
         env,
-        f"git -C /testbed reset --hard {shlex.quote(base_commit)} && "
-        "git -C /testbed clean -fd",
+        f"git -C {WORKTREE} reset --hard {shlex.quote(base_commit)} && "
+        f"git -C {WORKTREE} clean -fd",
         timeout=120,
     )
     _require_success(result, "navigator mutation rollback")
@@ -268,18 +326,18 @@ def _reset_worktree(env: Any, base_commit: str) -> None:
 
 def capture_patch(env: Any, base_commit: str) -> tuple[str, list[str], str | None]:
     try:
-        stage = _execute(env, "git -C /testbed add -A -- .", timeout=60)
+        stage = _execute(env, f"git -C {WORKTREE} add -A -- .", timeout=60)
         _require_success(stage, "git add")
         patch_result = _execute(
             env,
-            f"git -C /testbed diff --cached --binary --no-color "
+            f"git -C {WORKTREE} diff --cached --binary --no-color "
             f"{shlex.quote(base_commit)} -- .",
             timeout=120,
         )
         _require_success(patch_result, "git diff")
         names_result = _execute(
             env,
-            f"git -C /testbed diff --cached --name-only -z "
+            f"git -C {WORKTREE} diff --cached --name-only -z "
             f"{shlex.quote(base_commit)} -- .",
             timeout=30,
         )
@@ -346,10 +404,13 @@ def _phase_user_prompt(
     return "\n".join([*issue, *handoffs])
 
 
+PHASE_PROMPT_BUILDER = _phase_user_prompt
+
+
 @dataclass
 class PhaseState:
     request: dict[str, Any]
-    row: SweBenchRow
+    row: Any
     env: Any
     api_key: str
     agent_factory: Callable[..., Any]
@@ -444,7 +505,7 @@ class PhaseState:
                 with self.coordinator._active_children_lock:
                     self.coordinator._active_children.append(child)
             result = child.run_conversation(
-                _phase_user_prompt(
+                PHASE_PROMPT_BUILDER(
                     phase,
                     self.row,
                     previous_records,
@@ -588,7 +649,7 @@ def reconciled_workflow(
 def _runtime_metadata(request: dict[str, Any], env: Any) -> dict[str, Any]:
     return {
         "schemaVersion": 1,
-        "benchmark": BENCHMARK,
+        "benchmark": WORKER_BENCHMARK,
         "taskId": request["taskId"],
         "containerId": getattr(env, "_container_id", None),
         "image": request["image"],
@@ -608,9 +669,9 @@ def run_worker(
     *,
     agent_factory: Callable[..., Any] = default_agent_factory,
 ) -> dict[str, Any]:
-    if request.get("benchmark") != BENCHMARK:
+    if request.get("benchmark") != WORKER_BENCHMARK:
         raise BenchmarkError("Worker request benchmark does not match")
-    row = parse_swebench_row(request.get("row"))
+    row = ROW_PARSER(request.get("row"))
     if canonical_model(str(request.get("model") or "")) != request.get("model"):
         raise BenchmarkError("Worker request model must be canonical")
     source_identity = validate_source_identity(request.get("sourceIdentity"))
@@ -692,7 +753,7 @@ def run_worker(
     workflow_complete = reconciled_workflow(state, coordinator_result, error)
     result = {
         "schemaVersion": 1,
-        "benchmark": BENCHMARK,
+        "benchmark": WORKER_BENCHMARK,
         "instanceId": row.instance_id,
         "model": request["model"],
         "temperature": TEMPERATURE,
@@ -745,7 +806,7 @@ def run_worker(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Internal SWE-bench Verified worker")
+    parser = argparse.ArgumentParser(description=f"Internal {WORKER_BENCHMARK} worker")
     parser.add_argument("--request", required=True)
     return parser
 
@@ -776,7 +837,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _redact(
                     {
                         "schemaVersion": 1,
-                        "benchmark": BENCHMARK,
+                        "benchmark": WORKER_BENCHMARK,
                         "modelPatch": None,
                         "changedPaths": [],
                         "workflowComplete": False,
