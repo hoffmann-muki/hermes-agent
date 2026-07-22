@@ -314,6 +314,7 @@ hermes-agent = "run_agent:main"
 hermes-acp = "acp_adapter.entry:main"
 hermes-swebench-verified = "hermes_cli.benchmarks.swebench_verified:main"
 hermes-swebench-pro = "hermes_cli.benchmarks.swebench_pro:main"
+hermes-terminalbench = "hermes_cli.benchmarks.terminalbench:main"
 
 [tool.setuptools]
 py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajectory_compressor", "toolset_distributions", "cli", "hermes_bootstrap", "hermes_constants", "hermes_state", "hermes_time", "hermes_logging", "utils", "mcp_serve"]
