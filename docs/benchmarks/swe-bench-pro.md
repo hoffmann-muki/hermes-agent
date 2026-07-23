@@ -18,6 +18,7 @@ integrations in this workspace:
 | Temperature | `0.1` |
 | Inference/evaluation workers | `1` / `1` |
 | Attempts/retries | `1` / `0` |
+| Hermes API attempts/retries per model call | `1` / `0` (`api_max_retries: 1`) |
 | Agent deadline | 1,800 seconds |
 | Setup/teardown guard | 600 seconds |
 | Agent sequence | coordinator → navigator → patcher → reviewer |
@@ -40,12 +41,12 @@ post-run audit checks the observed native calls, leaf roles, order, and
 completion status without intercepting or mechanically enforcing orchestration.
 
 Parity here means the same selected instances, model/temperature, one
-benchmark-level attempt, zero outer retries, one worker, agent deadline,
-topology/budgets, image family, and official evaluator flags. Provider clients
-have different internal retry behavior, and each framework has its own
-setup/teardown and worktree architecture. Hermes pins the dataset revision that
-the peer configurations currently resolve instead of silently accepting later
-dataset changes.
+benchmark-level attempt, zero outer retries, one provider request attempt per
+model call, one worker, agent deadline, topology/budgets, image family, and
+official evaluator flags. Each framework retains its own setup/teardown and
+worktree architecture. Hermes pins the dataset revision that the peer
+configurations currently resolve instead of silently accepting later dataset
+changes.
 
 ## Prerequisites
 
