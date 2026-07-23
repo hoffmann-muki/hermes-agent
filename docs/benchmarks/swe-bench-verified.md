@@ -82,9 +82,10 @@ hermes-swebench-verified infer \
 
 Alternatively, select a dataset window with `--offset` and
 `--max-instances`. Either option disables the implicit smoke instance. Public
-hints are excluded unless `--include-hints` is supplied. Use `--dry-run` to
-inspect resolved IDs, images, budgets, and output paths without Docker or an API
-call.
+hints are excluded unless `--include-hints` is supplied. Dataset windows
+preserve dataset order. Explicit IDs preserve command order, reject duplicates,
+and take precedence over the window size. Use `--dry-run` to inspect resolved
+IDs, images, budgets, and output paths without Docker or an API call.
 
 The runner inspects or pulls the official image
 `docker.io/swebench/sweb.eval.x86_64.{repo}_1776_{name}:latest`; it does not

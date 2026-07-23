@@ -81,8 +81,10 @@ hermes-swebench-pro infer \
 
 Alternatively, select a dataset window with `--offset` and
 `--max-instances`. Any explicit selection disables the implicit smoke
-instance. `--dry-run` resolves the public rows, image tags, budgets, and output
-paths without Docker or an API call.
+instance. Dataset windows preserve dataset order. Explicit IDs preserve command
+order, reject duplicates, and take precedence over the window size. `--dry-run`
+resolves the public rows, image tags, budgets, and output paths without Docker
+or an API call.
 
 Inference receives only the public fields `repo`, `instance_id`, `base_commit`,
 `problem_statement`, `requirements`, `interface`, `repo_language`, and
