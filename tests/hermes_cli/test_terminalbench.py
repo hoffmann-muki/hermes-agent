@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import threading
 from pathlib import Path
 
 import pytest
@@ -27,11 +26,25 @@ def test_safe_defaults_match_peer_terminal_bench_runners():
     assert options.public is False
     assert options.leaderboard is False
     assert worker.COORDINATOR_BUDGET == 24
-    assert worker.PHASE_BUDGETS == {
+    assert worker.PEER_PHASE_BUDGETS == {
         "navigator": 10,
         "patcher": 18,
         "reviewer": 12,
     }
+    assert worker.NATIVE_SUBAGENT_BUDGET == 13
+    assert worker.NATIVE_SUBAGENT_COUNT == 3
+    assert benchmark.DEFAULT_DELEGATION_MODE == "native"
+    assert worker.DELEGATION_MODE == benchmark.DEFAULT_DELEGATION_MODE
+    assert worker.COORDINATOR_BUDGET == benchmark.DEFAULT_COORDINATOR_BUDGET
+    assert worker.PEER_PHASE_BUDGETS == benchmark.DEFAULT_PHASE_BUDGETS
+    assert (
+        worker.NATIVE_SUBAGENT_BUDGET
+        == benchmark.DEFAULT_NATIVE_SUBAGENT_BUDGET
+    )
+    assert (
+        worker.NATIVE_SUBAGENT_COUNT
+        == benchmark.DEFAULT_NATIVE_SUBAGENT_COUNT
+    )
     assert worker.TEMPERATURE == 0.1
     assert worker.API_MAX_RETRIES == 1
 
@@ -154,94 +167,68 @@ def test_benchmark_environment_exposes_only_adapter_path_changes(monkeypatch):
     assert env["OPENROUTER_API_KEY"] == "secret"
 
 
-class FakeAgent:
-    def __init__(self, role: str, budget: int, calls: list[dict[str, object]]):
-        self.role = role
-        self.budget = budget
-        self.calls = calls
-        self.session_id = f"session-{role}-{len(calls)}"
-        self._active_children = []
-        self._active_children_lock = threading.Lock()
-        self.released = False
+def native_delegation_messages(phases=("navigator", "patcher", "reviewer")):
+    messages = []
+    for index, phase in enumerate(phases):
+        call_id = f"delegate-{index}"
+        messages.extend([
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "function": {
+                            "name": "delegate_task",
+                            "arguments": json.dumps({
+                                "goal": f"[benchmark-{phase}] perform {phase}",
+                                "context": "Full task and prior handoffs.",
+                                "role": "leaf",
+                            }),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": json.dumps({
+                    "results": [
+                        {
+                            "status": "completed",
+                            "summary": f"{phase} report",
+                            "api_calls": index + 1,
+                            "duration_seconds": 0.5,
+                        }
+                    ]
+                }),
+            },
+        ])
+    return messages
 
-    def run_conversation(self, prompt: str, *, system_message: str, task_id: str):
-        self.calls.append({
-            "role": self.role,
-            "budget": self.budget,
-            "prompt": prompt,
-            "system": system_message,
-            "task_id": task_id,
-            "agent": self,
-        })
-        return {
-            "completed": True,
-            "interrupted": False,
-            "api_calls": self.budget,
-            "turn_exit_reason": "text_response(stop)",
-            "final_response": f"{self.role} report",
-            "messages": [{"role": "assistant", "content": f"{self.role} report"}],
-        }
 
-    def release_clients(self):
-        self.released = True
-
-
-def make_phase_state(tmp_path: Path):
-    calls: list[dict[str, object]] = []
-
-    def factory(*, role, budget, **_kwargs):
-        return FakeAgent(role, budget, calls)
-
-    state = worker.PhaseState(
-        instruction="Create the requested artifact.",
-        workdir=tmp_path,
-        api_key="not-a-real-key",
-        model="qwen/qwen3-coder-next",
-        task_id="shared-task",
-        agent_factory=factory,
+def test_native_delegation_audit_records_sequential_leaf_handoffs():
+    records, errors = worker.audit_native_delegations(
+        native_delegation_messages()
     )
-    state.coordinator = FakeAgent("coordinator", 24, calls)
-    return state, calls
 
-
-def test_phase_tool_enforces_fresh_blocking_order_and_handoffs(tmp_path: Path):
-    state, calls = make_phase_state(tmp_path)
-
-    responses = [
-        json.loads(state.handler({"phase": phase}, task_id="shared-task"))
-        for phase in worker.PHASE_ORDER
+    assert errors == []
+    assert [record["phase"] for record in records] == list(worker.PHASE_ORDER)
+    assert [record["budget"] for record in records] == [13, 13, 13]
+    assert [record["report"] for record in records] == [
+        "navigator report",
+        "patcher report",
+        "reviewer report",
     ]
-
-    assert [call["role"] for call in calls] == list(worker.PHASE_ORDER)
-    assert [call["budget"] for call in calls] == [10, 18, 12]
-    assert len({id(call["agent"]) for call in calls}) == 3
-    assert all(call["task_id"] == "shared-task" for call in calls)
-    assert "navigator report" in str(calls[1]["prompt"])
-    assert "patcher report" in str(calls[2]["prompt"])
-    assert [response["status"] for response in responses] == [
-        "completed",
-        "completed",
-        "completed",
-    ]
-    assert state.workflow_complete is True
-    assert all(call["agent"].released for call in calls)
-    assert state.coordinator._active_children == []
+    assert all(record["nativeDelegation"] for record in records)
+    assert all(record["freshAgent"] for record in records)
 
 
-def test_phase_tool_rejects_skips_repeats_and_parallel_calls(tmp_path: Path):
-    state, calls = make_phase_state(tmp_path)
-    skipped = json.loads(state.handler({"phase": "patcher"}))
+def test_native_delegation_audit_reports_wrong_order():
+    _records, errors = worker.audit_native_delegations(
+        native_delegation_messages(("patcher", "navigator", "reviewer"))
+    )
 
-    assert "error" in skipped
-    assert calls == []
-
-    state, calls = make_phase_state(tmp_path)
-    state.handler({"phase": "navigator"})
-    repeated = json.loads(state.handler({"phase": "navigator"}))
-
-    assert "error" in repeated
-    assert [call["role"] for call in calls] == ["navigator"]
-    assert state.workflow_complete is False
+    assert any("Expected native delegation order" in error for error in errors)
 
 
 def test_worker_config_is_local_isolated_and_retry_free(tmp_path: Path, monkeypatch):
@@ -261,6 +248,12 @@ def test_worker_config_is_local_isolated_and_retry_free(tmp_path: Path, monkeypa
         "timeout": 180,
     }
     assert config["agent"] == {"api_max_retries": 1, "coding_context": "off"}
+    assert config["delegation"] == {
+        "max_iterations": 13,
+        "max_concurrent_children": 1,
+        "max_spawn_depth": 1,
+        "orchestrator_enabled": False,
+    }
     assert config["memory"]["memory_enabled"] is False
     assert config["checkpoints"]["enabled"] is False
     assert config["plugins"]["enabled"] == []

@@ -20,15 +20,21 @@ this workspace:
 | Concurrent Harbor trials | `1` |
 | Environment | Local Docker |
 | Agent sequence | coordinator → navigator → patcher → reviewer |
-| Iteration budgets | `24` / `10` / `18` / `12` |
+| Iteration budgets | Coordinator `24`; three native children at `13` each |
 | Hermes API attempts/retries per model call | `1` / `0` (`api_max_retries: 1`) |
 
-The coordinator invokes a benchmark-only synchronous phase tool. Each phase
-uses a fresh Hermes agent in the same Harbor task container. The navigator is
-instructed to use file and terminal inspection tools without changing state;
-the patcher performs the task; the reviewer independently
-checks the resulting state and may make small corrections. The runtime rejects
-skipped, repeated, out-of-order, or overlapping phase calls.
+The coordinator uses Hermes' native `delegate_task` tool for one fresh leaf
+agent at a time in the same Harbor task environment. The one-shot worker
+declares stateless delivery, activating Hermes' supported synchronous fallback
+so each handoff returns before the next role. The navigator is instructed to
+inspect without changing state; the patcher performs the task; the reviewer
+independently checks the result and may make small corrections.
+
+Native delegation gives every child the same 13-iteration cap (39 combined),
+the closest lower-cost match to the peers' `10` / `18` / `12` specialist split
+(40 combined). A post-run audit checks the observed native calls, leaf roles,
+order, and completion status. It marks parity violations in the result but does
+not intercept or mechanically enforce the framework's orchestration.
 
 Harbor's official task definitions remain authoritative for setup, agent, and
 verifier timeouts. The wrapper does not impose the SWE-bench 1,800-second agent
@@ -37,8 +43,8 @@ deadline on Terminal-Bench tasks.
 ## Prerequisites
 
 - Harbor on `PATH` (the integration is tested with Harbor 0.20.0).
-- A running local Docker daemon. Configure Docker Desktop with at least 16 GiB
-  of memory for the broader benchmark suite.
+- A running local Docker daemon. The wrapper defaults to one Harbor trial at a
+  time, leaving the daemon's available memory as the effective task limit.
 - `OPENROUTER_API_KEY` exported in the shell that starts the run.
 - The Hermes `play` branch and current commit available on the checkout's
   `origin` remote, because Harbor installs that exact revision into each task
@@ -96,4 +102,5 @@ Artifacts are written below:
 ```
 
 They include a manifest, streamed Harbor stdout/stderr, native Harbor jobs,
-verifier results, Hermes phase records, usage totals, and an ATIF trajectory.
+verifier results, Hermes native-delegation audit records, usage totals, and an
+ATIF trajectory.

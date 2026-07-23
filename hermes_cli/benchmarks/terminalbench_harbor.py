@@ -79,17 +79,19 @@ class BenchmarkHermes(Hermes):
                 "hermes version"
             ),
         )
-        worker_source = Path(__file__).with_name("terminalbench_worker.py")
-        worker_copy = self.logs_dir / "terminalbench_worker.py"
-        worker_copy.write_text(
-            worker_source.read_text(encoding="utf-8"), encoding="utf-8"
-        )
-        await environment.upload_file(
-            source_path=worker_copy,
-            target_path="/installed-agent/terminalbench_worker.py",
-        )
+        for name in ("terminalbench_worker.py", "native_delegation.py"):
+            source = Path(__file__).with_name(name)
+            uploaded = self.logs_dir / name
+            uploaded.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            await environment.upload_file(
+                source_path=uploaded,
+                target_path=f"/installed-agent/{name}",
+            )
         result = await environment.exec(
-            command="chmod 0555 /installed-agent/terminalbench_worker.py",
+            command=(
+                "chmod 0555 /installed-agent/terminalbench_worker.py "
+                "/installed-agent/native_delegation.py"
+            ),
             user="root",
         )
         if result.return_code != 0:
@@ -158,5 +160,8 @@ fi
             **(context.metadata or {}),
             "workflow_complete": bool(result.get("workflowComplete")),
             "phase_order": result.get("phaseOrder"),
-            "phase_budgets": result.get("phaseBudgets"),
+            "delegation_mode": result.get("delegationMode"),
+            "native_subagent_budget": result.get("nativeSubagentBudget"),
+            "native_subagent_count": result.get("nativeSubagentCount"),
+            "peer_phase_budget_reference": result.get("peerPhaseBudgetReference"),
         }

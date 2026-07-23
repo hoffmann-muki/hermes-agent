@@ -278,9 +278,9 @@ def build_prompt(row: SweBenchProRow, _include_hints: bool = False) -> str:
         "Do not seek or use gold patches, hidden tests, or benchmark answer artifacts.",
         "Do not modify tests or benchmark metadata unless the issue explicitly requires it.",
         "",
-        "The benchmark coordinator must call the fresh foreground roles exactly once",
-        "and in this order: navigator, patcher, reviewer. It then reconciles their",
-        "reports and leaves the final source changes in the shared worktree.",
+        "The benchmark coordinator must use Hermes-native delegation for one fresh",
+        "leaf agent at a time in this order: navigator, patcher, reviewer. It then",
+        "reconciles their reports and leaves final changes in the shared worktree.",
         "",
         "## Repository",
         "Worktree: /app",
@@ -562,8 +562,13 @@ def _manifest(
         "agentSequence": list(swebench_verified.DEFAULT_AGENT_SEQUENCE),
         "agentBudgets": {
             "coordinator": swebench_verified.DEFAULT_COORDINATOR_BUDGET,
-            **swebench_verified.DEFAULT_PHASE_BUDGETS,
+            "nativeSubagent": swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET,
+            "nativeSubagentCount": (
+                swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT
+            ),
         },
+        "delegationMode": swebench_verified.DEFAULT_DELEGATION_MODE,
+        "peerPhaseBudgetReference": swebench_verified.DEFAULT_PHASE_BUDGETS,
         "selectedInstances": _selected_instances(options, rows),
         "instancesSha256": swebench_verified.sha256_text(instances_content),
         "completedInstanceIds": [item["instance_id"] for item in predictions],
@@ -667,8 +672,13 @@ def _expected_resume_contract(
         "agentSequence": list(swebench_verified.DEFAULT_AGENT_SEQUENCE),
         "agentBudgets": {
             "coordinator": swebench_verified.DEFAULT_COORDINATOR_BUDGET,
-            **swebench_verified.DEFAULT_PHASE_BUDGETS,
+            "nativeSubagent": swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET,
+            "nativeSubagentCount": (
+                swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT
+            ),
         },
+        "delegationMode": swebench_verified.DEFAULT_DELEGATION_MODE,
+        "peerPhaseBudgetReference": swebench_verified.DEFAULT_PHASE_BUDGETS,
         "selectedInstances": _selected_instances(options, rows),
         "instancesSha256": swebench_verified.sha256_text(instances_content),
     }
@@ -799,10 +809,23 @@ def run_inference(
                     "agentTimeoutSeconds": options.agent_timeout_seconds,
                     "setupTimeoutSeconds": options.setup_timeout_seconds,
                     "sequence": list(swebench_verified.DEFAULT_AGENT_SEQUENCE),
-                    "budgets": [
-                        swebench_verified.DEFAULT_COORDINATOR_BUDGET,
-                        *swebench_verified.DEFAULT_PHASE_BUDGETS.values(),
-                    ],
+                    "delegationMode": swebench_verified.DEFAULT_DELEGATION_MODE,
+                    "coordinatorBudget": (
+                        swebench_verified.DEFAULT_COORDINATOR_BUDGET
+                    ),
+                    "nativeSubagentBudget": (
+                        swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET
+                    ),
+                    "nativeSubagentCount": (
+                        swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT
+                    ),
+                    "nativeSubagentTotalBudget": (
+                        swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET
+                        * swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT
+                    ),
+                    "peerPhaseBudgetReference": (
+                        swebench_verified.DEFAULT_PHASE_BUDGETS
+                    ),
                     "images": [
                         official_image(row.dockerhub_tag, options.image_prefix)
                         for row in rows

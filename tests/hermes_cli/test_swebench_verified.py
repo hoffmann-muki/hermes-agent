@@ -78,11 +78,14 @@ def test_cli_defaults_match_other_frameworks(tmp_path):
     assert benchmark.DEFAULT_API_MAX_RETRIES == 1
     assert benchmark.DEFAULT_CODING_CONTEXT == "off"
     assert worker.COORDINATOR_BUDGET == 24
-    assert worker.PHASE_BUDGETS == {
+    assert worker.PEER_PHASE_BUDGETS == {
         "navigator": 10,
         "patcher": 18,
         "reviewer": 12,
     }
+    assert worker.NATIVE_SUBAGENT_BUDGET == 13
+    assert worker.NATIVE_SUBAGENT_COUNT == 3
+    assert benchmark.DEFAULT_DELEGATION_MODE == "native"
     assert worker.TEMPERATURE == 0.1
 
 
@@ -190,167 +193,105 @@ def test_official_image_derivation_and_validation():
     assert re.fullmatch(r"[A-Za-z0-9_.-]+", task_id)
 
 
-def test_hints_are_opt_in_for_all_agent_prompts():
+def test_hints_are_opt_in_for_benchmark_prompt():
     row = benchmark.parse_swebench_row(make_row())
     without_hints = benchmark.build_prompt(row, include_hints=False)
     with_hints = benchmark.build_prompt(row, include_hints=True)
-    phase_without_hints = worker._phase_user_prompt(
-        "navigator", row, [], include_hints=False
-    )
-    phase_with_hints = worker._phase_user_prompt(
-        "navigator", row, [], include_hints=True
-    )
 
     assert "Inspect validation." not in without_hints
     assert "Inspect validation." in with_hints
-    assert "Inspect validation." not in phase_without_hints
-    assert "Inspect validation." in phase_with_hints
 
 
-class FakeEnvironment:
-    def __init__(self, *, navigator_mutates: bool = False):
-        self.commands = []
-        self.navigator_mutates = navigator_mutates
-        self.status_calls = 0
-
-    def execute(self, command, cwd, timeout):
-        self.commands.append((command, cwd, timeout))
-        if "status --porcelain" in command:
-            self.status_calls += 1
-            output = ""
-            if self.navigator_mutates and self.status_calls == 2:
-                output = " M changed.py"
-            return {"output": output, "returncode": 0}
-        return {"output": "", "returncode": 0}
-
-
-class FakeAgent:
-    def __init__(self, role, budget, calls):
-        self.role = role
-        self.budget = budget
-        self.calls = calls
-        self.session_id = f"session-{role}-{len(calls)}"
-        self._active_children = []
-        self._active_children_lock = threading.Lock()
-        self.released = False
-
-    def run_conversation(self, prompt, *, system_message, task_id):
-        self.calls.append({
-            "role": self.role,
-            "budget": self.budget,
-            "prompt": prompt,
-            "system": system_message,
-            "task_id": task_id,
-            "agent": self,
-        })
-        return {
-            "completed": True,
-            "interrupted": False,
-            "api_calls": self.budget,
-            "turn_exit_reason": "text_response(stop)",
-            "final_response": f"{self.role} report",
-            "messages": [{"role": "assistant", "content": f"{self.role} report"}],
+def native_delegation_messages(
+    phases=("navigator", "patcher", "reviewer"),
+    *,
+    role="leaf",
+    batch=False,
+):
+    messages = []
+    for index, phase in enumerate(phases):
+        call_id = f"delegate-{index}"
+        arguments = {
+            "goal": f"[benchmark-{phase}] complete the {phase} role",
+            "context": "Full task and prior handoffs.",
+            "role": role,
         }
+        if batch:
+            arguments["tasks"] = [
+                {
+                    "goal": arguments.pop("goal"),
+                    "context": arguments.pop("context"),
+                    "role": role,
+                }
+            ]
+        messages.extend([
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "function": {
+                            "name": "delegate_task",
+                            "arguments": json.dumps(arguments),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": json.dumps({
+                    "results": [
+                        {
+                            "status": "completed",
+                            "summary": f"{phase} report",
+                            "api_calls": index + 1,
+                            "duration_seconds": 0.5,
+                        }
+                    ]
+                }),
+            },
+        ])
+    return messages
 
-    def release_clients(self):
-        self.released = True
 
-
-def make_phase_state(*, navigator_mutates=False):
-    calls = []
-
-    def factory(*, role, budget, **_kwargs):
-        return FakeAgent(role, budget, calls)
-
-    request = {
-        "taskId": "shared-task",
-        "model": benchmark.DEFAULT_MODEL,
-        "includeHints": False,
-    }
-    state = worker.PhaseState(
-        request=request,
-        row=benchmark.parse_swebench_row(make_row()),
-        env=FakeEnvironment(navigator_mutates=navigator_mutates),
-        api_key="not-a-real-key",
-        agent_factory=factory,
+def test_native_delegation_audit_records_sequential_leaf_handoffs():
+    records, errors = worker.audit_native_delegations(
+        native_delegation_messages()
     )
-    state.coordinator = FakeAgent("coordinator", 24, calls)
-    return state, calls
 
-
-def test_phase_tool_enforces_fresh_blocking_order_and_exact_budgets():
-    state, calls = make_phase_state()
-
-    responses = [
-        json.loads(state.handler({"phase": phase}, task_id="shared-task"))
-        for phase in worker.PHASE_ORDER
+    assert errors == []
+    assert [record["phase"] for record in records] == list(worker.PHASE_ORDER)
+    assert [record["budget"] for record in records] == [13, 13, 13]
+    assert [record["report"] for record in records] == [
+        "navigator report",
+        "patcher report",
+        "reviewer report",
     ]
-
-    assert [call["role"] for call in calls] == list(worker.PHASE_ORDER)
-    assert [call["budget"] for call in calls] == [10, 18, 12]
-    assert len({id(call["agent"]) for call in calls}) == 3
-    assert all(call["task_id"] == "shared-task" for call in calls)
-    assert "navigator report" in calls[1]["prompt"]
-    assert "patcher report" in calls[2]["prompt"]
-    assert [response["status"] for response in responses] == [
-        "completed",
-        "completed",
-        "completed",
-    ]
-    assert state.workflow_complete is True
-    assert all(call["agent"].released for call in calls)
-    assert state.coordinator._active_children == []
+    assert all(record["nativeDelegation"] for record in records)
+    assert all(record["freshAgent"] for record in records)
 
 
-def test_phase_tool_rejects_skips_and_repeats():
-    state, calls = make_phase_state()
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        (
+            native_delegation_messages(("patcher", "navigator", "reviewer")),
+            "Expected native delegation order",
+        ),
+        (native_delegation_messages(role="orchestrator"), "was not a leaf"),
+        (native_delegation_messages(batch=True), "used batch mode"),
+    ],
+)
+def test_native_delegation_audit_reports_parity_violations(messages, expected):
+    _records, errors = worker.audit_native_delegations(messages)
 
-    skipped = json.loads(state.handler({"phase": "patcher"}, task_id="shared-task"))
-    assert "error" in skipped
-    assert calls == []
-
-    state, calls = make_phase_state()
-    state.handler({"phase": "navigator"}, task_id="shared-task")
-    repeated = json.loads(state.handler({"phase": "navigator"}, task_id="shared-task"))
-    assert "error" in repeated
-    assert [call["role"] for call in calls] == ["navigator"]
-    assert state.workflow_complete is False
-
-
-@pytest.mark.parametrize("args", [{}, {"phase": None}])
-def test_phase_tool_rejects_missing_or_non_string_phase_after_completion(args):
-    state, calls = make_phase_state()
-    for phase in worker.PHASE_ORDER:
-        state.handler({"phase": phase}, task_id="shared-task")
-
-    response = json.loads(state.handler(args, task_id="shared-task"))
-
-    assert "error" in response
-    assert len(calls) == len(worker.PHASE_ORDER)
-
-
-def test_navigator_mutation_is_discarded_and_invalidates_workflow():
-    state, _calls = make_phase_state(navigator_mutates=True)
-
-    response = json.loads(state.handler({"phase": "navigator"}, task_id="shared-task"))
-
-    assert response["readOnlyViolation"] is True
-    assert response["status"] == "failed"
-    assert any(
-        "reset --hard" in command for command, _cwd, _timeout in state.env.commands
-    )
-    rollback = next(
-        command
-        for command, _cwd, _timeout in state.env.commands
-        if "reset --hard" in command
-    )
-    assert "git -C /testbed clean -fd" in rollback
-    assert "clean -fdx" not in rollback
-    assert state.workflow_complete is False
+    assert any(expected in error for error in errors)
 
 
 def test_initial_setup_preserves_image_provided_ignored_artifacts(monkeypatch):
     commands = []
+    overrides = []
     fake_environment = object()
 
     def terminal_tool(**kwargs):
@@ -358,7 +299,8 @@ def test_initial_setup_preserves_image_provided_ignored_artifacts(monkeypatch):
         return json.dumps({"exit_code": 0, "output": ""})
 
     monkeypatch.setattr(
-        "tools.terminal_tool.register_task_env_overrides", lambda *_args: None
+        "tools.terminal_tool.register_task_env_overrides",
+        lambda *args: overrides.append(args),
     )
     monkeypatch.setattr("tools.terminal_tool.terminal_tool", terminal_tool)
     monkeypatch.setattr(
@@ -375,6 +317,7 @@ def test_initial_setup_preserves_image_provided_ignored_artifacts(monkeypatch):
     assert worker.CONDA_ACTIVATION in commands[0]
     assert f"reset --hard {BASE_COMMIT}" in commands[0]
     assert "git clean" not in commands[0]
+    assert overrides == [("setup-test", {"cwd": "/testbed"})]
 
 
 def test_worker_terminal_config_is_local_docker_without_resource_caps_or_forwarded_secrets(
@@ -410,6 +353,12 @@ def test_worker_terminal_config_is_local_docker_without_resource_caps_or_forward
     assert config["agent"] == {
         "api_max_retries": 1,
         "coding_context": "off",
+    }
+    assert config["delegation"] == {
+        "max_iterations": 13,
+        "max_concurrent_children": 1,
+        "max_spawn_depth": 1,
+        "orchestrator_enabled": False,
     }
     assert type(config["agent"]["api_max_retries"]) is int
 
@@ -458,9 +407,7 @@ def test_worker_config_reaches_terminal_runtime_consumption_point(
     assert consumed["docker_extra_args"] == terminal_config["docker_extra_args"]
 
 
-def test_actual_agent_tool_scopes_keep_navigator_strictly_read_only(
-    tmp_path, monkeypatch
-):
+def test_actual_coordinator_exposes_native_delegation(tmp_path, monkeypatch):
     request = {
         "taskId": "scope-test",
         "model": benchmark.DEFAULT_MODEL,
@@ -477,41 +424,27 @@ def test_actual_agent_tool_scopes_keep_navigator_strictly_read_only(
     worker.configure_worker(request)
     monkeypatch.setenv("TERMINAL_ENV", "local")
     monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-benchmark-key")
-    state = SimpleNamespace(handler=lambda _args, **_kwargs: "ok")
-    worker.register_phase_tool(state)
-    agents = []
+    coordinator = None
     try:
-        navigator = worker.default_agent_factory(
-            role="navigator",
-            budget=10,
-            api_key="dummy-benchmark-key",
-            request=request,
-        )
         coordinator = worker.default_agent_factory(
             role="coordinator",
             budget=24,
             api_key="dummy-benchmark-key",
             request=request,
         )
-        agents.extend([navigator, coordinator])
 
-        assert navigator.valid_tool_names == {"read_file", "search_files"}
-        assert navigator.model == "qwen/qwen3-coder-next"
-        assert navigator.max_iterations == 10
-        assert navigator.request_overrides["temperature"] == 0.1
-        assert navigator._api_max_retries == 1
-        assert navigator.client.max_retries == 0
         assert coordinator.valid_tool_names == {
+            "delegate_task",
             "patch",
             "process",
             "read_file",
             "search_files",
-            "swe_benchmark_phase",
             "terminal",
             "write_file",
         }
-        assert "delegate_task" not in coordinator.valid_tool_names
+        assert coordinator.model == "qwen/qwen3-coder-next"
         assert coordinator.max_iterations == 24
+        assert coordinator.request_overrides["temperature"] == 0.1
         assert coordinator._api_max_retries == 1
         assert coordinator.client.max_retries == 0
         from agent.coding_context import resolve_runtime_mode
@@ -528,9 +461,8 @@ def test_actual_agent_tool_scopes_keep_navigator_strictly_read_only(
         assert mode.is_coding is False
         assert mode.system_blocks() == []
     finally:
-        for agent in agents:
-            agent.release_clients()
-        worker.deregister_phase_tool()
+        if coordinator is not None:
+            coordinator.release_clients()
 
 
 def test_worker_environment_passes_only_openrouter_credential(monkeypatch, tmp_path):
@@ -550,7 +482,9 @@ def test_worker_environment_passes_only_openrouter_credential(monkeypatch, tmp_p
     assert env["HERMES_HOME"] == str(tmp_path)
 
 
-def test_phase_tool_pool_timeout_exceeds_shared_agent_deadline(tmp_path, monkeypatch):
+def test_delegation_tool_pool_timeout_exceeds_shared_agent_deadline(
+    tmp_path, monkeypatch
+):
     request = {
         "hermesHome": str(tmp_path / "home"),
         "image": benchmark.official_image(INSTANCE),
@@ -662,8 +596,6 @@ def test_timed_out_worker_defers_capture_and_container_cleanup(tmp_path, monkeyp
     monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-benchmark-key")
     monkeypatch.setattr(worker, "configure_worker", lambda _request: None)
     monkeypatch.setattr(worker, "setup_environment", lambda _request: fake_environment)
-    monkeypatch.setattr(worker, "register_phase_tool", lambda _state: None)
-    monkeypatch.setattr(worker, "deregister_phase_tool", lambda: None)
     monkeypatch.setattr(worker.signal, "signal", fake_signal)
     monkeypatch.setattr(
         worker,
@@ -726,8 +658,6 @@ def test_completed_worker_also_defers_capture_and_container_cleanup(
     monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-benchmark-key")
     monkeypatch.setattr(worker, "configure_worker", lambda _request: None)
     monkeypatch.setattr(worker, "setup_environment", lambda _request: fake_environment)
-    monkeypatch.setattr(worker, "register_phase_tool", lambda _state: None)
-    monkeypatch.setattr(worker, "deregister_phase_tool", lambda: None)
     monkeypatch.setattr(
         worker,
         "capture_patch",
@@ -1042,15 +972,19 @@ def test_interrupt_during_ownership_still_removes_container_and_persists_patch(
 
 
 def test_workflow_requires_coordinator_reconciliation():
-    state, _calls = make_phase_state()
-    for phase in worker.PHASE_ORDER:
-        state.handler({"phase": phase}, task_id="shared-task")
+    records, errors = worker.audit_native_delegations(
+        native_delegation_messages()
+    )
 
-    assert state.workflow_complete is True
-    assert worker.reconciled_workflow(state, {"completed": False}, None) is False
+    assert worker.reconciled_workflow(
+        records, errors, {"completed": False}, None
+    ) is False
     assert (
         worker.reconciled_workflow(
-            state, {"completed": True, "interrupted": False}, None
+            records,
+            errors,
+            {"completed": True, "interrupted": False},
+            None,
         )
         is True
     )
@@ -1447,4 +1381,13 @@ def test_dry_run_reports_parity_contract_without_requiring_api_key(tmp_path, cap
     assert payload["agentTimeoutSeconds"] == 1800
     assert payload["setupTimeoutSeconds"] == 600
     assert payload["sequence"] == ["coordinator", "navigator", "patcher", "reviewer"]
-    assert payload["budgets"] == [24, 10, 18, 12]
+    assert payload["delegationMode"] == "native"
+    assert payload["coordinatorBudget"] == 24
+    assert payload["nativeSubagentBudget"] == 13
+    assert payload["nativeSubagentCount"] == 3
+    assert payload["nativeSubagentTotalBudget"] == 39
+    assert payload["peerPhaseBudgetReference"] == {
+        "navigator": 10,
+        "patcher": 18,
+        "reviewer": 12,
+    }

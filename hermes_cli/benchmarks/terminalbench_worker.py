@@ -2,83 +2,75 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sys
-import threading
 import time
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import yaml
 
+if __package__:
+    from hermes_cli.benchmarks.native_delegation import (
+        audit_native_delegations as audit_delegations,
+    )
+else:
+    # The Harbor adapter uploads the invoking checkout's worker and helper so
+    # dirty integration edits can run before their branch commit is installed.
+    audit_delegations = importlib.import_module(
+        "native_delegation"
+    ).audit_native_delegations
+
 
 BENCHMARK = "terminal-bench-2.1"
+# This file is uploaded as a standalone Harbor entrypoint, so keep its parity
+# constants local and cover their agreement with the wrapper in tests.
 COORDINATOR_BUDGET = 24
-PHASE_BUDGETS = {"navigator": 10, "patcher": 18, "reviewer": 12}
-PHASE_ORDER = tuple(PHASE_BUDGETS)
+PEER_PHASE_BUDGETS = {"navigator": 10, "patcher": 18, "reviewer": 12}
+PHASE_ORDER = tuple(PEER_PHASE_BUDGETS)
+DELEGATION_MODE = "native"
+NATIVE_SUBAGENT_COUNT = len(PEER_PHASE_BUDGETS)
+NATIVE_SUBAGENT_BUDGET = (
+    sum(PEER_PHASE_BUDGETS.values()) // NATIVE_SUBAGENT_COUNT
+)
 TEMPERATURE = 0.1
 API_MAX_RETRIES = 1
-PHASE_TOOL_TIMEOUT_SECONDS = 24 * 60 * 60
+DELEGATION_TOOL_TIMEOUT_SECONDS = 24 * 60 * 60
 MAX_PHASE_REPORT_CHARS = 20_000
-READ_ONLY_TOOLSET = "terminal-benchmark-readonly"
-PHASE_TOOLSET = "terminal-benchmark"
+DELEGATION_GOAL_MARKERS = {
+    "navigator": "[benchmark-navigator]",
+    "patcher": "[benchmark-patcher]",
+    "reviewer": "[benchmark-reviewer]",
+}
 RESULT_PATH = Path("/logs/agent/hermes-result.json")
 SESSION_PATH = Path("/logs/agent/hermes-session.jsonl")
 
 
 COORDINATOR_SYSTEM_PROMPT = """You are the primary Terminal-Bench coordinator.
 
-You own the final environment state. Use terminal_benchmark_phase exactly once
-for each fresh specialist, one call at a time, in this exact order:
+You own the final environment state. Use Hermes' native delegate_task tool for
+one fresh leaf subagent at a time, in this order:
 
-1. navigator — investigate the environment and produce an evidence-backed plan.
-2. patcher — perform the concrete work and run focused checks.
-3. reviewer — independently verify the final state and make small clear corrections.
+1. navigator — use a goal beginning [benchmark-navigator]. Ask it to investigate
+   without changing state and return an evidence-backed plan.
+2. patcher — after the navigator returns, use a goal beginning [benchmark-patcher].
+   Pass the original task and navigator handoff; require the concrete work and
+   focused verification.
+3. reviewer — after the patcher returns, use a goal beginning [benchmark-reviewer].
+   Pass the original task and prior handoffs; require independent verification and
+   only small clearly necessary corrections.
 
-Wait for each phase result before calling the next. Do not skip, repeat, parallelize,
-or replace a phase with general delegation. Passes are synchronous and share the same
-task environment. After the reviewer returns, reconcile the reports, inspect any
+For every call use role="leaf" and include the complete task, shared working
+directory, role constraints, and prior handoffs in context because native Hermes
+subagents start with fresh context. Call sequentially, not as a tasks batch. Native
+delegation returns synchronously in this benchmark runner and all children share the
+same task environment. After the reviewer returns, reconcile the reports, inspect any
 remaining risk with your own tools, make only necessary final corrections, and give a
 concise final answer. Changes to the environment—not prose—are the benchmark answer.
 """
-
-PHASE_SYSTEM_PROMPTS = {
-    "navigator": """You are a fresh, read-only Terminal-Bench navigator.
-Investigate the task, environment, relevant files, constraints, likely root cause, and
-a practical verification strategy. Do not modify state or delegate. Return a concise,
-evidence-backed execution plan with concrete paths and commands for the patcher.""",
-    "patcher": """You are a fresh Terminal-Bench implementation specialist.
-Use the original task and navigator handoff, inspect the environment yourself, perform
-the concrete work, and run focused checks. Do not delegate. Leave the required state in
-the shared environment and report actions, verification, and remaining risk.""",
-    "reviewer": """You are a fresh independent Terminal-Bench reviewer.
-Inspect the original task, current environment, and prior handoffs. Verify the final
-state, run feasible checks, and make small corrective changes when clearly necessary.
-Do not delegate or redo sound work for preference alone. Report findings and risk.""",
-}
-
-PHASE_TOOL_SCHEMA: dict[str, Any] = {
-    "description": (
-        "Run the next required fresh Terminal-Bench specialist synchronously. "
-        "Call navigator, then patcher, then reviewer, exactly once each."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "phase": {
-                "type": "string",
-                "enum": list(PHASE_ORDER),
-                "description": "The next required benchmark phase.",
-            }
-        },
-        "required": ["phase"],
-        "additionalProperties": False,
-    },
-}
-
 
 def _redact(value: Any, secret: str) -> Any:
     if isinstance(value, str):
@@ -103,11 +95,12 @@ def _atomic_write_json(path: Path, value: Any) -> None:
 def _configure_runtime(workdir: Path) -> None:
     hermes_home = Path(os.environ.get("HERMES_HOME", "/tmp/hermes"))
     hermes_home.mkdir(parents=True, exist_ok=True)
-    # The coordinator invokes each specialist through one synchronous custom
-    # tool call. Keep Hermes' generic seven-minute tool watchdog from becoming
-    # an undocumented benchmark deadline; Harbor's task timeout remains the
-    # authoritative outer limit and terminates this process first.
-    os.environ["HERMES_CONCURRENT_TOOL_TIMEOUT_S"] = str(PHASE_TOOL_TIMEOUT_SECONDS)
+    # Native delegate_task executes inline in this one-shot worker. Keep the
+    # generic tool watchdog from becoming an undocumented benchmark deadline;
+    # Harbor's task timeout remains the authoritative outer limit.
+    os.environ["HERMES_CONCURRENT_TOOL_TIMEOUT_S"] = str(
+        DELEGATION_TOOL_TIMEOUT_SECONDS
+    )
     config = {
         "terminal": {
             "backend": "local",
@@ -125,6 +118,12 @@ def _configure_runtime(workdir: Path) -> None:
             "api_max_retries": API_MAX_RETRIES,
             "coding_context": "off",
         },
+        "delegation": {
+            "max_iterations": NATIVE_SUBAGENT_BUDGET,
+            "max_concurrent_children": 1,
+            "max_spawn_depth": 1,
+            "orchestrator_enabled": False,
+        },
     }
     config_path = hermes_home / "config.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=True), encoding="utf-8")
@@ -132,29 +131,6 @@ def _configure_runtime(workdir: Path) -> None:
     from hermes_cli.config import apply_terminal_config_to_env
 
     apply_terminal_config_to_env(config=config, override=True)
-
-
-def _phase_prompt(
-    phase: str, instruction: str, records: Sequence[dict[str, Any]], workdir: Path
-) -> str:
-    handoffs = []
-    for record in records:
-        report = str(record.get("report") or "").strip()
-        if report:
-            handoffs.extend([
-                f"### {str(record['phase']).title()} handoff",
-                report[:MAX_PHASE_REPORT_CHARS],
-                "",
-            ])
-    return "\n".join([
-        f"Complete the {phase} phase for this Terminal-Bench 2.1 task.",
-        f"Shared working directory: {workdir}",
-        "",
-        "## Original task",
-        instruction.strip(),
-        "",
-        *handoffs,
-    ])
 
 
 def _usage(result: dict[str, Any]) -> dict[str, int | float]:
@@ -181,130 +157,16 @@ def _merge_usage(results: Sequence[dict[str, Any]]) -> dict[str, int | float]:
     return merged
 
 
-@dataclass
-class PhaseState:
-    instruction: str
-    workdir: Path
-    api_key: str
-    model: str
-    task_id: str
-    agent_factory: Callable[..., Any]
-    coordinator: Any = None
-    next_phase: int = 0
-    in_progress: bool = False
-    records: list[dict[str, Any]] = field(default_factory=list)
-    protocol_errors: list[str] = field(default_factory=list)
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-    @property
-    def workflow_complete(self) -> bool:
-        return (
-            self.next_phase == len(PHASE_ORDER)
-            and not self.in_progress
-            and not self.protocol_errors
-            and all(record.get("status") == "completed" for record in self.records)
-        )
-
-    def handler(self, args: dict[str, Any], **kwargs: Any) -> str:
-        phase = args.get("phase")
-        with self.lock:
-            expected = (
-                PHASE_ORDER[self.next_phase]
-                if self.next_phase < len(PHASE_ORDER)
-                else None
-            )
-            if not isinstance(phase, str):
-                error = "Benchmark phase must be a string"
-                self.protocol_errors.append(error)
-                return json.dumps({"error": error})
-            if self.in_progress:
-                error = "A benchmark phase is already running; wait for it to finish"
-                self.protocol_errors.append(error)
-                return json.dumps({"error": error})
-            if phase != expected:
-                error = f"Expected phase {expected!r}, received {phase!r}"
-                self.protocol_errors.append(error)
-                return json.dumps({"error": error})
-            self.in_progress = True
-            previous_records = list(self.records)
-
-        record = self._run_phase(phase, previous_records, kwargs.get("task_id"))
-        with self.lock:
-            self.records.append(record)
-            self.next_phase += 1
-            self.in_progress = False
-        return json.dumps(
-            {
-                "phase": phase,
-                "status": record["status"],
-                "report": str(record.get("report") or "")[:MAX_PHASE_REPORT_CHARS],
-                "apiCalls": record.get("apiCalls", 0),
-                "budget": record["budget"],
-                "error": record.get("error"),
-                "nextRequiredPhase": (
-                    PHASE_ORDER[self.next_phase]
-                    if self.next_phase < len(PHASE_ORDER)
-                    else None
-                ),
-            },
-            ensure_ascii=False,
-        )
-
-    def _run_phase(
-        self,
-        phase: str,
-        previous_records: Sequence[dict[str, Any]],
-        task_id: str | None,
-    ) -> dict[str, Any]:
-        started = time.monotonic()
-        child = None
-        result: dict[str, Any] = {}
-        error = None
-        try:
-            child = self.agent_factory(
-                role=phase,
-                budget=PHASE_BUDGETS[phase],
-                api_key=self.api_key,
-                model=self.model,
-                task_id=self.task_id,
-                parent_session_id=getattr(self.coordinator, "session_id", None),
-            )
-            if self.coordinator is not None:
-                with self.coordinator._active_children_lock:
-                    self.coordinator._active_children.append(child)
-            result = child.run_conversation(
-                _phase_prompt(phase, self.instruction, previous_records, self.workdir),
-                system_message=PHASE_SYSTEM_PROMPTS[phase],
-                task_id=task_id or self.task_id,
-            )
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-        finally:
-            if child is not None and self.coordinator is not None:
-                try:
-                    with self.coordinator._active_children_lock:
-                        self.coordinator._active_children.remove(child)
-                except ValueError:
-                    pass
-            if child is not None:
-                child.release_clients()
-
-        completed = bool(result.get("completed"))
-        return {
-            "phase": phase,
-            "budget": PHASE_BUDGETS[phase],
-            "status": "completed" if completed and not error else "failed",
-            "freshAgent": True,
-            "report": result.get("final_response") or "",
-            "apiCalls": result.get("api_calls", 0),
-            "turnExitReason": result.get("turn_exit_reason"),
-            "completed": completed,
-            "interrupted": bool(result.get("interrupted")),
-            "error": error,
-            "messages": result.get("messages", []),
-            "usage": _usage(result),
-            "durationSeconds": round(time.monotonic() - started, 3),
-        }
+def audit_native_delegations(
+    messages: Any,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    return audit_delegations(
+        messages,
+        phase_order=PHASE_ORDER,
+        goal_markers=DELEGATION_GOAL_MARKERS,
+        subagent_budget=NATIVE_SUBAGENT_BUDGET,
+        max_report_chars=MAX_PHASE_REPORT_CHARS,
+    )
 
 
 def default_agent_factory(
@@ -319,12 +181,8 @@ def default_agent_factory(
     from hermes_constants import OPENROUTER_BASE_URL
     from run_agent import AIAgent
 
-    if role == "navigator":
-        toolsets = [READ_ONLY_TOOLSET]
-    elif role == "coordinator":
-        toolsets = ["terminal", "file", PHASE_TOOLSET]
-    else:
-        toolsets = ["terminal", "file"]
+    if role != "coordinator":
+        raise ValueError("Native benchmark delegation only constructs a coordinator")
     return AIAgent(
         base_url=OPENROUTER_BASE_URL,
         api_key=api_key,
@@ -332,7 +190,7 @@ def default_agent_factory(
         model=model,
         max_iterations=budget,
         tool_delay=0,
-        enabled_toolsets=toolsets,
+        enabled_toolsets=["terminal", "file", "delegation"],
         save_trajectories=False,
         verbose_logging=False,
         quiet_mode=True,
@@ -343,33 +201,6 @@ def default_agent_factory(
         parent_session_id=parent_session_id or "",
         checkpoints_enabled=False,
     )
-
-
-def register_phase_tool(state: PhaseState) -> None:
-    from toolsets import create_custom_toolset
-    from tools.registry import registry
-
-    create_custom_toolset(
-        READ_ONLY_TOOLSET,
-        "Read-only investigation tools for the Terminal-Bench navigator",
-        tools=["read_file", "search_files", "terminal", "process"],
-    )
-    registry.register(
-        name="terminal_benchmark_phase",
-        toolset=PHASE_TOOLSET,
-        schema=PHASE_TOOL_SCHEMA,
-        handler=state.handler,
-        description=PHASE_TOOL_SCHEMA["description"],
-        emoji="🧪",
-    )
-
-
-def deregister_phase_tool() -> None:
-    from toolsets import TOOLSETS
-    from tools.registry import registry
-
-    registry.deregister("terminal_benchmark_phase")
-    TOOLSETS.pop(READ_ONLY_TOOLSET, None)
 
 
 def _write_session(results: Sequence[dict[str, Any]], secret: str) -> None:
@@ -396,21 +227,15 @@ def run_worker(
     agent_factory: Callable[..., Any] = default_agent_factory,
 ) -> dict[str, Any]:
     _configure_runtime(workdir)
+    from gateway.session_context import declare_stateless_channel
+
+    declare_stateless_channel()
     task_id = f"terminalbench-{uuid.uuid4().hex}"
-    state = PhaseState(
-        instruction=instruction,
-        workdir=workdir,
-        api_key=api_key,
-        model=model,
-        task_id=task_id,
-        agent_factory=agent_factory,
-    )
     coordinator = None
     coordinator_result: dict[str, Any] = {}
     error = None
     started = time.monotonic()
     try:
-        register_phase_tool(state)
         coordinator = agent_factory(
             role="coordinator",
             budget=COORDINATOR_BUDGET,
@@ -418,7 +243,6 @@ def run_worker(
             model=model,
             task_id=task_id,
         )
-        state.coordinator = coordinator
         coordinator_result = coordinator.run_conversation(
             instruction,
             system_message=COORDINATOR_SYSTEM_PROMPT,
@@ -429,17 +253,19 @@ def run_worker(
     finally:
         if coordinator is not None:
             coordinator.release_clients()
-        try:
-            deregister_phase_tool()
-        except Exception:
-            pass
 
-    phase_results = [
-        {**record.get("usage", {}), "messages": record.get("messages", [])}
-        for record in state.records
-    ]
-    all_results = [coordinator_result, *phase_results]
-    _write_session(all_results, api_key)
+    records, audit_errors = audit_native_delegations(
+        coordinator_result.get("messages")
+    )
+    workflow_complete = bool(
+        [record.get("phase") for record in records] == list(PHASE_ORDER)
+        and all(record.get("status") == "completed" for record in records)
+        and not audit_errors
+        and coordinator_result.get("completed")
+        and not coordinator_result.get("interrupted")
+        and not error
+    )
+    _write_session([coordinator_result], api_key)
     result = {
         "schemaVersion": 1,
         "benchmark": BENCHMARK,
@@ -448,13 +274,16 @@ def run_worker(
         "attempt": 1,
         "maxInfrastructureRetries": 0,
         "apiMaxRetries": API_MAX_RETRIES,
-        "phaseToolTimeoutSeconds": PHASE_TOOL_TIMEOUT_SECONDS,
+        "delegationToolTimeoutSeconds": DELEGATION_TOOL_TIMEOUT_SECONDS,
         "coordinatorBudget": COORDINATOR_BUDGET,
-        "phaseBudgets": PHASE_BUDGETS,
+        "delegationMode": DELEGATION_MODE,
+        "nativeSubagentBudget": NATIVE_SUBAGENT_BUDGET,
+        "nativeSubagentCount": NATIVE_SUBAGENT_COUNT,
+        "peerPhaseBudgetReference": PEER_PHASE_BUDGETS,
         "phaseOrder": list(PHASE_ORDER),
-        "workflowComplete": state.workflow_complete,
-        "protocolErrors": state.protocol_errors,
-        "phases": state.records,
+        "workflowComplete": workflow_complete,
+        "delegationAuditErrors": audit_errors,
+        "phases": records,
         "coordinator": {
             "completed": bool(coordinator_result.get("completed")),
             "interrupted": bool(coordinator_result.get("interrupted")),
@@ -464,7 +293,7 @@ def run_worker(
             "messages": coordinator_result.get("messages", []),
             "usage": _usage(coordinator_result),
         },
-        "usage": _merge_usage(all_results),
+        "usage": _merge_usage([coordinator_result]),
         "error": error,
         "durationSeconds": round(time.monotonic() - started, 3),
     }

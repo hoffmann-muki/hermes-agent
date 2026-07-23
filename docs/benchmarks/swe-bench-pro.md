@@ -21,17 +21,23 @@ integrations in this workspace:
 | Agent deadline | 1,800 seconds |
 | Setup/teardown guard | 600 seconds |
 | Agent sequence | coordinator → navigator → patcher → reviewer |
-| Iteration budgets | `24` / `10` / `18` / `12` |
+| Iteration budgets | Coordinator `24`; three native children at `13` each |
 | Inference image prefix | `docker.io/jefzda/sweap-images` |
 | Container worktree | `/app` |
 | Evaluator | `scaleapi/SWE-bench_Pro-os` at `0c64e26f00b9c190432de7fc520c8ceed5c25518` |
 | Evaluation mode | local Docker, username `jefzda`, network enabled |
 
-The coordinator invokes three fresh, blocking specialist agents through the
-same benchmark-only tool used by the Verified runner. All four agents share one
-`/app` container. The navigator is read-only and checked for worktree mutations;
-the patcher and reviewer edit the shared checkout; the coordinator reconciles
-the final result.
+The coordinator uses Hermes' native `delegate_task` tool for one fresh leaf
+agent at a time. The one-shot worker's stateless delivery declaration makes
+each native delegation return synchronously before the next role begins. All
+four agents share one `/app` container.
+
+Hermes natively exposes one delegated-child iteration cap, so each specialist
+gets 13 iterations (39 combined), the closest lower-cost match to the peers'
+`10` / `18` / `12` split (40 combined). Prompts preserve the navigator →
+patcher → reviewer semantics and tell the navigator not to modify state. A
+post-run audit checks the observed native calls, leaf roles, order, and
+completion status without intercepting or mechanically enforcing orchestration.
 
 Parity here means the same selected instances, model/temperature, one
 benchmark-level attempt, zero outer retries, one worker, agent deadline,
@@ -43,8 +49,8 @@ dataset changes.
 
 ## Prerequisites
 
-- A working local Docker daemon. Configure Docker Desktop with at least 16 GiB
-  of memory. Hermes applies no smaller per-container CPU, memory, or disk cap.
+- A working local Docker daemon. Hermes runs instances serially by default and
+  applies no per-container CPU, memory, or disk cap.
 - `OPENROUTER_API_KEY` exported in the shell that starts inference.
 - For evaluation, a dedicated Python environment providing the official
   harness requirements, including `docker`, `pandas`, and `tqdm`.
@@ -100,8 +106,8 @@ Artifacts are written below:
 .benchmark-runs/swe-bench-pro/runs/<run-id>/
 ```
 
-They include public selected rows, prompts, redacted worker logs, phase records,
-patches, Scale-format `predictions.json`, summaries, and a SHA-256-bound
+They include public selected rows, prompts, redacted worker logs,
+native-delegation audit records, patches, Scale-format `predictions.json`, summaries, and a SHA-256-bound
 completion manifest. The manifest also binds resume to the exact Hermes source
 identity, pinned dataset revision, complete public-row hashes, and
 configuration. Use `--restart` to replace a matching run.

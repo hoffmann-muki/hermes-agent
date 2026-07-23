@@ -50,6 +50,14 @@ DEFAULT_CODING_CONTEXT = "off"
 DEFAULT_COORDINATOR_BUDGET = 24
 DEFAULT_PHASE_BUDGETS = {"navigator": 10, "patcher": 18, "reviewer": 12}
 DEFAULT_AGENT_SEQUENCE = ("coordinator", *DEFAULT_PHASE_BUDGETS)
+DEFAULT_DELEGATION_MODE = "native"
+DEFAULT_NATIVE_SUBAGENT_COUNT = len(DEFAULT_PHASE_BUDGETS)
+# Hermes' native delegate_task uses one configured cap for every child. Three
+# children at 13 iterations preserve the peers' 40-iteration combined phase
+# allowance to within one iteration without adding benchmark-only dispatch.
+DEFAULT_NATIVE_SUBAGENT_BUDGET = (
+    sum(DEFAULT_PHASE_BUDGETS.values()) // DEFAULT_NATIVE_SUBAGENT_COUNT
+)
 REQUIRED_SWEBENCH_VERSION = "4.1.0"
 DATASET_PAGE_SIZE = 100
 DATASET_FETCH_ATTEMPTS = 3
@@ -330,9 +338,9 @@ def build_prompt(row: SweBenchRow, include_hints: bool) -> str:
         "Do not seek or use gold patches, hidden tests, or benchmark answer artifacts.",
         "Do not modify tests or benchmark metadata unless the issue explicitly requires it.",
         "",
-        "The benchmark coordinator must call the fresh foreground roles exactly once",
-        "and in this order: navigator, patcher, reviewer. It then reconciles their",
-        "reports and leaves the final source changes in the shared worktree.",
+        "The benchmark coordinator must use Hermes-native delegation for one fresh",
+        "leaf agent at a time in this order: navigator, patcher, reviewer. It then",
+        "reconciles their reports and leaves final changes in the shared worktree.",
         "",
         "## Repository",
         "Worktree: /testbed",
@@ -1340,8 +1348,11 @@ def _manifest(
         "agentSequence": list(DEFAULT_AGENT_SEQUENCE),
         "agentBudgets": {
             "coordinator": DEFAULT_COORDINATOR_BUDGET,
-            **DEFAULT_PHASE_BUDGETS,
+            "nativeSubagent": DEFAULT_NATIVE_SUBAGENT_BUDGET,
+            "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
         },
+        "delegationMode": DEFAULT_DELEGATION_MODE,
+        "peerPhaseBudgetReference": DEFAULT_PHASE_BUDGETS,
         "selectedInstances": [
             {
                 "instanceId": row.instance_id,
@@ -1481,9 +1492,14 @@ def _load_resume(
         mismatches.append("agent sequence")
     if manifest.get("agentBudgets") != {
         "coordinator": DEFAULT_COORDINATOR_BUDGET,
-        **DEFAULT_PHASE_BUDGETS,
+        "nativeSubagent": DEFAULT_NATIVE_SUBAGENT_BUDGET,
+        "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
     }:
         mismatches.append("agent budgets")
+    if manifest.get("delegationMode") != DEFAULT_DELEGATION_MODE:
+        mismatches.append("delegation mode")
+    if manifest.get("peerPhaseBudgetReference") != DEFAULT_PHASE_BUDGETS:
+        mismatches.append("peer phase budget reference")
     if mismatches:
         raise BenchmarkError(
             f"Existing run differs in {', '.join(mismatches)}; use --restart"
@@ -1600,10 +1616,15 @@ def run_inference(
                     "agentTimeoutSeconds": options.agent_timeout_seconds,
                     "setupTimeoutSeconds": options.setup_timeout_seconds,
                     "sequence": list(DEFAULT_AGENT_SEQUENCE),
-                    "budgets": [
-                        DEFAULT_COORDINATOR_BUDGET,
-                        *DEFAULT_PHASE_BUDGETS.values(),
-                    ],
+                    "delegationMode": DEFAULT_DELEGATION_MODE,
+                    "coordinatorBudget": DEFAULT_COORDINATOR_BUDGET,
+                    "nativeSubagentBudget": DEFAULT_NATIVE_SUBAGENT_BUDGET,
+                    "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
+                    "nativeSubagentTotalBudget": (
+                        DEFAULT_NATIVE_SUBAGENT_BUDGET
+                        * DEFAULT_NATIVE_SUBAGENT_COUNT
+                    ),
+                    "peerPhaseBudgetReference": DEFAULT_PHASE_BUDGETS,
                     "images": [
                         official_image(row.instance_id, options.image_template)
                         for row in rows

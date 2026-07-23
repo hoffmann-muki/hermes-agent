@@ -21,20 +21,29 @@ this workspace:
 | Hermes API attempts/retries per model call | `1` / `0` (`api_max_retries: 1`) |
 | Agent deadline | 1,800 seconds |
 | Agent sequence | coordinator → navigator → patcher → reviewer |
-| Iteration budgets | `24` / `10` / `18` / `12` |
+| Iteration budgets | Coordinator `24`; three native children at `13` each |
 | Evaluator | `swebench==4.1.0`, local Docker |
 
-The coordinator invokes three fresh, blocking specialist agents through a
-benchmark-only runtime tool. All four agents share one `/testbed` container.
-The navigator is checked for worktree mutations; any changes it makes are
-discarded and mark the workflow unsuccessful. The patcher and reviewer edit the
-shared checkout, and the coordinator performs final reconciliation.
+The coordinator uses Hermes' native `delegate_task` tool for one fresh leaf
+agent at a time. The one-shot worker declares a stateless delivery channel, so
+Hermes uses its supported synchronous fallback and returns each handoff before
+the coordinator starts the next role. All four agents share one `/testbed`
+container.
+
+Native Hermes exposes one iteration cap for every delegated child, rather than
+per-role caps. Three children at 13 iterations provide a combined allowance of
+39, the closest lower-cost match to the peers' `10` / `18` / `12` split (40
+total). The prompts preserve the navigator → patcher → reviewer semantics and
+require the navigator not to modify state. A post-run audit records native
+delegation calls, leaf roles, order, and completion status; a violation marks
+the workflow incomplete but does not replace or mechanically constrain Hermes'
+native orchestration.
 
 ## Prerequisites
 
-- A working local Docker daemon. On Docker Desktop, configure the VM with at
-  least 16 GiB of memory. Hermes does not apply a smaller per-container memory,
-  CPU, or disk cap for this benchmark.
+- A working local Docker daemon. Hermes runs instances serially by default and
+  applies no per-container memory, CPU, or disk cap; available daemon memory
+  therefore remains the effective limit for each instance.
 - `OPENROUTER_API_KEY` exported in the shell that starts inference.
 - For evaluation only, a Python environment containing exactly
   `swebench==4.1.0`.
@@ -107,7 +116,7 @@ Artifacts are written below:
 ```
 
 They include the selected public rows, prompt, worker logs and messages,
-per-phase records, patch, official prediction JSONL, summary, and a completion
+native-delegation audit records, patch, official prediction JSONL, summary, and a completion
 manifest bound to the predictions with SHA-256. The manifest also records the
 exact Hermes Git commit and a fingerprint of local source changes; resume refuses
 to mix predictions produced by different runner code, and an active run aborts if

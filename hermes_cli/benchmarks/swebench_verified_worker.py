@@ -13,9 +13,7 @@ import os
 import shlex
 import signal
 import threading
-import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
 
@@ -26,9 +24,11 @@ from hermes_cli.benchmarks.swebench_verified import (
     DEFAULT_API_MAX_RETRIES,
     DEFAULT_COORDINATOR_BUDGET,
     DEFAULT_CODING_CONTEXT,
+    DEFAULT_DELEGATION_MODE,
+    DEFAULT_NATIVE_SUBAGENT_BUDGET,
+    DEFAULT_NATIVE_SUBAGENT_COUNT,
     DEFAULT_PHASE_BUDGETS,
     BenchmarkError,
-    SweBenchRow,
     atomic_write_json,
     canonical_model,
     hermes_source_identity,
@@ -37,83 +37,57 @@ from hermes_cli.benchmarks.swebench_verified import (
     utc_now,
     validate_source_identity,
 )
+from hermes_cli.benchmarks.native_delegation import (
+    audit_native_delegations as audit_delegations,
+)
 
 
 COORDINATOR_BUDGET = DEFAULT_COORDINATOR_BUDGET
-PHASE_BUDGETS = DEFAULT_PHASE_BUDGETS
-PHASE_ORDER = tuple(PHASE_BUDGETS)
+PEER_PHASE_BUDGETS = DEFAULT_PHASE_BUDGETS
+PHASE_ORDER = tuple(PEER_PHASE_BUDGETS)
+NATIVE_SUBAGENT_BUDGET = DEFAULT_NATIVE_SUBAGENT_BUDGET
+NATIVE_SUBAGENT_COUNT = DEFAULT_NATIVE_SUBAGENT_COUNT
 TEMPERATURE = 0.1
 WORKTREE = "/testbed"
 CONDA_ACTIVATION = ". /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed"
 MAX_PHASE_REPORT_CHARS = 20_000
-PHASE_TOOL_TIMEOUT_GRACE_SECONDS = 60
-READ_ONLY_TOOLSET = "swe-benchmark-readonly"
+DELEGATION_TOOL_TIMEOUT_GRACE_SECONDS = 60
+DELEGATION_GOAL_MARKERS = {
+    "navigator": "[benchmark-navigator]",
+    "patcher": "[benchmark-patcher]",
+    "reviewer": "[benchmark-reviewer]",
+}
 
 
 COORDINATOR_SYSTEM_PROMPT = """You are benchmark-coordinator for a SWE-bench Verified task.
 
-You own the result, but three fresh specialists must work in the same foreground
-workspace before you finish. Call swe_benchmark_phase exactly once for each role,
-one call at a time, in this exact order:
+You own the result, but three fresh specialists must work in the same shared
+workspace before you finish. Use Hermes' native delegate_task tool for one fresh
+leaf subagent at a time, in this order:
 
-1. navigator — investigate only; it is read-only and returns an evidence-backed plan.
-2. patcher — implement the fix and run focused checks.
-3. reviewer — independently inspect the diff/tests and make small corrective edits.
+1. navigator — use a goal beginning [benchmark-navigator]. Ask it to investigate
+   without changing state and return an evidence-backed plan.
+2. patcher — after the navigator returns, use a goal beginning [benchmark-patcher].
+   Pass the original issue and navigator handoff; require the smallest complete fix
+   and focused verification.
+3. reviewer — after the patcher returns, use a goal beginning [benchmark-reviewer].
+   Pass the original issue and prior handoffs; require independent review, focused
+   checks, and only small clearly necessary corrections.
 
-Wait for each call to return before making the next. Do not skip, repeat, parallelize,
-or replace a phase with your own analysis. Do not invoke Hermes' general delegation.
-After reviewer returns, reconcile all reports, inspect the final worktree, make only
-necessary final corrections, run feasible verification, and provide a concise final
-summary. The source edits in /testbed—not prose—are the benchmark answer.
+For every call use role="leaf" and include the complete task, repository metadata,
+worktree path, role constraints, and prior handoffs in context because native Hermes
+subagents start with fresh context. Call sequentially, not as a tasks batch. Native
+delegation returns synchronously in this benchmark runner. After the reviewer returns,
+reconcile all reports, inspect the final worktree, make only necessary final
+corrections, run feasible verification, and provide a concise final summary. The
+source edits in /testbed—not prose—are the benchmark answer.
 
 Never seek a gold patch, hidden test patch, benchmark answer, or hidden grading data.
 Do not modify tests or benchmark metadata unless the issue explicitly requires it.
 """
 
-
-PHASE_SYSTEM_PROMPTS = {
-    "navigator": """You are benchmark-navigator, a fresh read-only SWE specialist.
-Investigate the issue and repository in /testbed. Trace the relevant implementation,
-tests, and likely root cause. Do not modify files, install into the repository, or run
-destructive commands. Return a concrete implementation and verification plan with
-paths and symbols. You cannot delegate.""",
-    "patcher": """You are benchmark-patcher, a fresh SWE implementation specialist.
-Work directly in /testbed. Use the navigator evidence, inspect the code yourself,
-implement the smallest correct fix, and run focused verification when feasible.
-Do not seek benchmark answers or hidden tests. You cannot delegate. Leave all source
-changes in the shared worktree and report changed paths, commands, and remaining risk.""",
-    "reviewer": """You are benchmark-reviewer, a fresh independent code reviewer.
-Inspect the issue, current /testbed worktree, and patcher report. Review the full diff
-for correctness, regressions, style, and missing edge cases. Run focused checks and
-make small corrective edits directly when justified. Do not rewrite a sound solution
-for preference alone. You cannot delegate. Report findings, fixes, verification, and
-residual risk.""",
-}
-
-
-PHASE_TOOL_SCHEMA: dict[str, Any] = {
-    "description": (
-        "Run the next required fresh SWE-bench specialist synchronously in the "
-        "shared /testbed worktree. Call navigator, then patcher, then reviewer, "
-        "exactly once each and wait for every result."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "phase": {
-                "type": "string",
-                "enum": list(PHASE_ORDER),
-                "description": "The next required benchmark phase.",
-            }
-        },
-        "required": ["phase"],
-        "additionalProperties": False,
-    },
-}
-
 WORKER_BENCHMARK: str = BENCHMARK
 ROW_PARSER = parse_swebench_row
-PHASE_PROMPT_BUILDER: Callable[..., str]
 
 
 @contextmanager
@@ -124,16 +98,12 @@ def worker_configuration(
     conda_activation: str,
     row_parser: Callable[[Any], Any],
     coordinator_system_prompt: str,
-    phase_system_prompts: dict[str, str],
-    phase_tool_schema: dict[str, Any],
-    phase_prompt_builder: Callable[..., str],
 ) -> Iterator[None]:
     """Temporarily specialize this process-isolated benchmark worker."""
     if worktree not in {"/app", "/testbed"}:
         raise BenchmarkError(f"Unsupported benchmark worktree: {worktree}")
     global WORKER_BENCHMARK, WORKTREE, CONDA_ACTIVATION, ROW_PARSER
-    global COORDINATOR_SYSTEM_PROMPT, PHASE_SYSTEM_PROMPTS, PHASE_TOOL_SCHEMA
-    global PHASE_PROMPT_BUILDER
+    global COORDINATOR_SYSTEM_PROMPT
 
     previous = (
         WORKER_BENCHMARK,
@@ -141,18 +111,12 @@ def worker_configuration(
         CONDA_ACTIVATION,
         ROW_PARSER,
         COORDINATOR_SYSTEM_PROMPT,
-        PHASE_SYSTEM_PROMPTS,
-        PHASE_TOOL_SCHEMA,
-        PHASE_PROMPT_BUILDER,
     )
     WORKER_BENCHMARK = benchmark
     WORKTREE = worktree
     CONDA_ACTIVATION = conda_activation
     ROW_PARSER = row_parser
     COORDINATOR_SYSTEM_PROMPT = coordinator_system_prompt
-    PHASE_SYSTEM_PROMPTS = phase_system_prompts
-    PHASE_TOOL_SCHEMA = phase_tool_schema
-    PHASE_PROMPT_BUILDER = phase_prompt_builder
     try:
         yield
     finally:
@@ -162,9 +126,6 @@ def worker_configuration(
             CONDA_ACTIVATION,
             ROW_PARSER,
             COORDINATOR_SYSTEM_PROMPT,
-            PHASE_SYSTEM_PROMPTS,
-            PHASE_TOOL_SCHEMA,
-            PHASE_PROMPT_BUILDER,
         ) = previous
 
 
@@ -228,6 +189,12 @@ def _terminal_config(request: dict[str, Any]) -> dict[str, Any]:
             # inject irrelevant repository state into the benchmark prompt.
             "coding_context": DEFAULT_CODING_CONTEXT,
         },
+        "delegation": {
+            "max_iterations": NATIVE_SUBAGENT_BUDGET,
+            "max_concurrent_children": 1,
+            "max_spawn_depth": 1,
+            "orchestrator_enabled": False,
+        },
     }
 
 
@@ -240,7 +207,8 @@ def configure_worker(request: dict[str, Any]) -> None:
     # agent deadline. This existing internal runtime knob is scoped to the
     # disposable worker process; the controller remains the hard wall clock.
     os.environ["HERMES_CONCURRENT_TOOL_TIMEOUT_S"] = str(
-        int(request["agentTimeoutSeconds"]) + PHASE_TOOL_TIMEOUT_GRACE_SECONDS
+        int(request["agentTimeoutSeconds"])
+        + DELEGATION_TOOL_TIMEOUT_GRACE_SECONDS
     )
     config = _terminal_config(request)
     config_path = hermes_home / "config.yaml"
@@ -273,9 +241,10 @@ def setup_environment(request: dict[str, Any]) -> Any:
     )
 
     task_id = request["taskId"]
-    register_task_env_overrides(
-        task_id, {"docker_image": request["image"], "cwd": WORKTREE}
-    )
+    # A CWD-only override intentionally collapses to Hermes' shared "default"
+    # container. Native delegate_task children use distinct task IDs but resolve
+    # to that same container, so every fresh child sees the same worktree.
+    register_task_env_overrides(task_id, {"cwd": WORKTREE})
     base_commit = request["row"]["base_commit"]
     activation = f"{CONDA_ACTIVATION} && " if CONDA_ACTIVATION else ""
     command = (
@@ -302,26 +271,6 @@ def setup_environment(request: dict[str, Any]) -> Any:
     if env is None:
         raise BenchmarkError("Hermes did not retain the benchmark Docker environment")
     return env
-
-
-def _status(env: Any) -> str:
-    result = _execute(
-        env,
-        f"git -C {WORKTREE} status --porcelain=v1 --untracked-files=all",
-        timeout=30,
-    )
-    _require_success(result, "git status")
-    return str(result.get("output") or "")
-
-
-def _reset_worktree(env: Any, base_commit: str) -> None:
-    result = _execute(
-        env,
-        f"git -C {WORKTREE} reset --hard {shlex.quote(base_commit)} && "
-        f"git -C {WORKTREE} clean -fd",
-        timeout=120,
-    )
-    _require_success(result, "navigator mutation rollback")
 
 
 def capture_patch(env: Any, base_commit: str) -> tuple[str, list[str], str | None]:
@@ -373,201 +322,16 @@ def restore_sandbox_ownership(env: Any) -> str | None:
     return ("\n".join(remaining) or "sandbox ownership handoff failed")[-2000:]
 
 
-def _phase_user_prompt(
-    phase: str,
-    row: SweBenchRow,
-    previous_records: Sequence[dict[str, Any]],
-    *,
-    include_hints: bool,
-) -> str:
-    handoffs = []
-    for record in previous_records:
-        report = str(record.get("report") or "").strip()
-        if report:
-            handoffs.extend([
-                f"### {record['phase'].title()} handoff",
-                report[:MAX_PHASE_REPORT_CHARS],
-                "",
-            ])
-    issue = [
-        f"Complete the {phase} phase for SWE-bench Verified instance {row.instance_id}.",
-        f"Repository: {row.repo}",
-        f"Base commit: {row.base_commit}",
-        "Worktree: /testbed",
-        "",
-        "## Issue",
-        row.problem_statement.strip(),
-        "",
-    ]
-    if include_hints and row.hints_text:
-        issue.extend(["## Public hints", row.hints_text.strip(), ""])
-    return "\n".join([*issue, *handoffs])
-
-
-PHASE_PROMPT_BUILDER = _phase_user_prompt
-
-
-@dataclass
-class PhaseState:
-    request: dict[str, Any]
-    row: Any
-    env: Any
-    api_key: str
-    agent_factory: Callable[..., Any]
-    coordinator: Any = None
-    next_phase: int = 0
-    in_progress: bool = False
-    records: list[dict[str, Any]] = field(default_factory=list)
-    protocol_errors: list[str] = field(default_factory=list)
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-    @property
-    def workflow_complete(self) -> bool:
-        return (
-            self.next_phase == len(PHASE_ORDER)
-            and not self.in_progress
-            and not self.protocol_errors
-            and all(record.get("status") == "completed" for record in self.records)
-        )
-
-    def handler(self, args: dict[str, Any], **kwargs: Any) -> str:
-        phase = args.get("phase")
-        with self.lock:
-            if not isinstance(phase, str):
-                error = "Benchmark phase must be a string"
-                self.protocol_errors.append(error)
-                return json.dumps({"error": error})
-            expected = (
-                PHASE_ORDER[self.next_phase]
-                if self.next_phase < len(PHASE_ORDER)
-                else None
-            )
-            if self.in_progress:
-                error = "A benchmark phase is already running; wait for it to finish"
-                self.protocol_errors.append(error)
-                return json.dumps({"error": error})
-            if phase != expected:
-                error = f"Expected phase {expected!r}, received {phase!r}"
-                self.protocol_errors.append(error)
-                return json.dumps({"error": error})
-            self.in_progress = True
-            previous_records = list(self.records)
-
-        record = self._run_phase(phase, previous_records, kwargs.get("task_id"))
-        with self.lock:
-            self.records.append(record)
-            self.next_phase += 1
-            self.in_progress = False
-        response = {
-            "phase": phase,
-            "status": record["status"],
-            "report": str(record.get("report") or "")[:MAX_PHASE_REPORT_CHARS],
-            "apiCalls": record.get("apiCalls", 0),
-            "budget": record["budget"],
-            "readOnlyViolation": record.get("readOnlyViolation", False),
-            "error": record.get("error"),
-            "nextRequiredPhase": (
-                PHASE_ORDER[self.next_phase]
-                if self.next_phase < len(PHASE_ORDER)
-                else None
-            ),
-        }
-        return json.dumps(response, ensure_ascii=False)
-
-    def _run_phase(
-        self,
-        phase: str,
-        previous_records: Sequence[dict[str, Any]],
-        task_id: str | None,
-    ) -> dict[str, Any]:
-        started_at = utc_now()
-        started = time.monotonic()
-        child = None
-        result: dict[str, Any] = {}
-        error = None
-        read_only_violation = False
-        pre_status = ""
-        try:
-            if phase == "navigator":
-                pre_status = _status(self.env)
-                if pre_status:
-                    raise BenchmarkError(
-                        "Coordinator modified the worktree before the navigator phase"
-                    )
-            child = self.agent_factory(
-                role=phase,
-                budget=PHASE_BUDGETS[phase],
-                api_key=self.api_key,
-                request=self.request,
-                parent_session_id=getattr(self.coordinator, "session_id", None),
-            )
-            if self.coordinator is not None:
-                with self.coordinator._active_children_lock:
-                    self.coordinator._active_children.append(child)
-            result = child.run_conversation(
-                PHASE_PROMPT_BUILDER(
-                    phase,
-                    self.row,
-                    previous_records,
-                    include_hints=bool(self.request.get("includeHints")),
-                ),
-                system_message=PHASE_SYSTEM_PROMPTS[phase],
-                task_id=task_id or self.request["taskId"],
-            )
-            if phase == "navigator":
-                post_status = _status(self.env)
-                if post_status:
-                    read_only_violation = True
-                    _reset_worktree(self.env, self.row.base_commit)
-                    error = "Navigator modified the read-only worktree; changes were discarded"
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-        finally:
-            if child is not None and self.coordinator is not None:
-                try:
-                    with self.coordinator._active_children_lock:
-                        self.coordinator._active_children.remove(child)
-                except ValueError:
-                    pass
-            if child is not None:
-                child.release_clients()
-
-        report = result.get("final_response") if isinstance(result, dict) else None
-        completed = bool(result.get("completed")) if isinstance(result, dict) else False
-        status = "completed" if completed and not error else "failed"
-        return {
-            "phase": phase,
-            "budget": PHASE_BUDGETS[phase],
-            "status": status,
-            "freshAgent": True,
-            "report": report if isinstance(report, str) else "",
-            "apiCalls": result.get("api_calls", 0) if isinstance(result, dict) else 0,
-            "turnExitReason": result.get("turn_exit_reason")
-            if isinstance(result, dict)
-            else None,
-            "completed": completed,
-            "interrupted": bool(result.get("interrupted"))
-            if isinstance(result, dict)
-            else False,
-            "readOnlyViolation": read_only_violation,
-            "error": error,
-            "messages": result.get("messages", []) if isinstance(result, dict) else [],
-            "usage": {
-                key: result.get(key, 0) if isinstance(result, dict) else 0
-                for key in (
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_read_tokens",
-                    "cache_write_tokens",
-                    "reasoning_tokens",
-                    "total_tokens",
-                    "estimated_cost_usd",
-                )
-            },
-            "startedAt": started_at,
-            "completedAt": utc_now(),
-            "durationSeconds": round(time.monotonic() - started, 3),
-        }
+def audit_native_delegations(
+    messages: Any,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    return audit_delegations(
+        messages,
+        phase_order=PHASE_ORDER,
+        goal_markers=DELEGATION_GOAL_MARKERS,
+        subagent_budget=NATIVE_SUBAGENT_BUDGET,
+        max_report_chars=MAX_PHASE_REPORT_CHARS,
+    )
 
 
 def default_agent_factory(
@@ -581,9 +345,8 @@ def default_agent_factory(
     from hermes_constants import OPENROUTER_BASE_URL
     from run_agent import AIAgent
 
-    toolsets = [READ_ONLY_TOOLSET] if role == "navigator" else ["terminal", "file"]
-    if role == "coordinator":
-        toolsets.append("swe-benchmark")
+    if role != "coordinator":
+        raise BenchmarkError("Native benchmark delegation only constructs a coordinator")
     return AIAgent(
         base_url=OPENROUTER_BASE_URL,
         api_key=api_key,
@@ -591,7 +354,7 @@ def default_agent_factory(
         model=provider_model(request["model"]),
         max_iterations=budget,
         tool_delay=0,
-        enabled_toolsets=toolsets,
+        enabled_toolsets=["terminal", "file", "delegation"],
         save_trajectories=False,
         verbose_logging=False,
         quiet_mode=True,
@@ -605,41 +368,16 @@ def default_agent_factory(
     )
 
 
-def register_phase_tool(state: PhaseState) -> None:
-    from toolsets import create_custom_toolset
-    from tools.registry import registry
-
-    create_custom_toolset(
-        READ_ONLY_TOOLSET,
-        "Read-only file inspection for the SWE-bench navigator",
-        tools=["read_file", "search_files"],
-    )
-    registry.register(
-        name="swe_benchmark_phase",
-        toolset="swe-benchmark",
-        schema=PHASE_TOOL_SCHEMA,
-        handler=state.handler,
-        description=PHASE_TOOL_SCHEMA["description"],
-        emoji="🧪",
-    )
-
-
-def deregister_phase_tool() -> None:
-    from toolsets import TOOLSETS
-    from tools.registry import registry
-
-    registry.deregister("swe_benchmark_phase")
-    TOOLSETS.pop(READ_ONLY_TOOLSET, None)
-
-
 def reconciled_workflow(
-    state: PhaseState | None,
+    records: Sequence[dict[str, Any]],
+    audit_errors: Sequence[str],
     coordinator_result: dict[str, Any],
     error: str | None,
 ) -> bool:
     return bool(
-        state is not None
-        and state.workflow_complete
+        [record.get("phase") for record in records] == list(PHASE_ORDER)
+        and all(record.get("status") == "completed" for record in records)
+        and not audit_errors
         and coordinator_result.get("completed")
         and not coordinator_result.get("interrupted")
         and not error
@@ -658,9 +396,13 @@ def _runtime_metadata(request: dict[str, Any], env: Any) -> dict[str, Any]:
         "agentStartedAt": utc_now(),
         "credentialEnvironmentNames": ["OPENROUTER_API_KEY"],
         "dockerForwardEnvironment": [],
-        "phaseToolTimeoutSeconds": (
-            int(request["agentTimeoutSeconds"]) + PHASE_TOOL_TIMEOUT_GRACE_SECONDS
+        "delegationToolTimeoutSeconds": (
+            int(request["agentTimeoutSeconds"])
+            + DELEGATION_TOOL_TIMEOUT_GRACE_SECONDS
         ),
+        "delegationMode": DEFAULT_DELEGATION_MODE,
+        "nativeSubagentBudget": NATIVE_SUBAGENT_BUDGET,
+        "nativeSubagentCount": NATIVE_SUBAGENT_COUNT,
     }
 
 
@@ -683,9 +425,9 @@ def run_worker(
 
     configure_worker(request)
     from tools.terminal_tool import clear_task_env_overrides
+    from gateway.session_context import declare_stateless_channel
 
     env = None
-    state = None
     coordinator = None
     coordinator_result: dict[str, Any] = {}
     error = None
@@ -707,21 +449,15 @@ def run_worker(
         if termination_requested.is_set():
             raise BenchmarkError("Worker terminated during setup")
 
-        state = PhaseState(
-            request=request,
-            row=row,
-            env=env,
-            api_key=api_key,
-            agent_factory=agent_factory,
-        )
-        register_phase_tool(state)
+        # Benchmark workers have no completion-queue drain. This supported
+        # one-shot mode makes native delegate_task calls return synchronously.
+        declare_stateless_channel()
         coordinator = agent_factory(
             role="coordinator",
             budget=COORDINATOR_BUDGET,
             api_key=api_key,
             request=request,
         )
-        state.coordinator = coordinator
         coordinator_result = coordinator.run_conversation(
             request["prompt"],
             system_message=COORDINATOR_SYSTEM_PROMPT,
@@ -739,18 +475,17 @@ def run_worker(
         if coordinator is not None:
             coordinator.release_clients()
         try:
-            deregister_phase_tool()
-        except Exception:
-            pass
-        try:
             clear_task_env_overrides(request["taskId"])
         finally:
             signal.signal(signal.SIGTERM, previous_sigterm)
             signal.signal(signal.SIGINT, previous_sigint)
 
-    records = state.records if state is not None else []
-    protocol_errors = state.protocol_errors if state is not None else []
-    workflow_complete = reconciled_workflow(state, coordinator_result, error)
+    records, audit_errors = audit_native_delegations(
+        coordinator_result.get("messages")
+    )
+    workflow_complete = reconciled_workflow(
+        records, audit_errors, coordinator_result, error
+    )
     result = {
         "schemaVersion": 1,
         "benchmark": WORKER_BENCHMARK,
@@ -764,10 +499,13 @@ def run_worker(
         "sourceIdentity": source_identity,
         "agentTimeoutSeconds": request["agentTimeoutSeconds"],
         "coordinatorBudget": COORDINATOR_BUDGET,
-        "phaseBudgets": PHASE_BUDGETS,
+        "delegationMode": DEFAULT_DELEGATION_MODE,
+        "nativeSubagentBudget": NATIVE_SUBAGENT_BUDGET,
+        "nativeSubagentCount": NATIVE_SUBAGENT_COUNT,
+        "peerPhaseBudgetReference": PEER_PHASE_BUDGETS,
         "phaseOrder": list(PHASE_ORDER),
         "workflowComplete": workflow_complete,
-        "protocolErrors": protocol_errors,
+        "delegationAuditErrors": audit_errors,
         "phases": records,
         "coordinator": {
             "completed": bool(coordinator_result.get("completed")),

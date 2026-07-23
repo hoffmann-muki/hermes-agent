@@ -106,15 +106,15 @@ def test_cli_defaults_match_peer_frameworks(tmp_path):
         "patcher",
         "reviewer",
     )
-    assert [
-        shared.DEFAULT_COORDINATOR_BUDGET,
-        *shared.DEFAULT_PHASE_BUDGETS.values(),
-    ] == [
-        24,
-        10,
-        18,
-        12,
-    ]
+    assert shared.DEFAULT_COORDINATOR_BUDGET == 24
+    assert shared.DEFAULT_NATIVE_SUBAGENT_BUDGET == 13
+    assert shared.DEFAULT_NATIVE_SUBAGENT_COUNT == 3
+    assert shared.DEFAULT_DELEGATION_MODE == "native"
+    assert shared.DEFAULT_PHASE_BUDGETS == {
+        "navigator": 10,
+        "patcher": 18,
+        "reviewer": 12,
+    }
 
 
 def test_explicit_instance_ids_and_window_disable_smoke_default():
@@ -326,6 +326,7 @@ def test_pro_worker_configuration_uses_app_and_restores_verified_globals(tmp_pat
 
 def test_pro_worker_setup_resets_app_without_assuming_conda(monkeypatch):
     commands = []
+    overrides = []
     fake_environment = object()
 
     def terminal_tool(**kwargs):
@@ -333,7 +334,8 @@ def test_pro_worker_setup_resets_app_without_assuming_conda(monkeypatch):
         return json.dumps({"exit_code": 0, "output": ""})
 
     monkeypatch.setattr(
-        "tools.terminal_tool.register_task_env_overrides", lambda *_args: None
+        "tools.terminal_tool.register_task_env_overrides",
+        lambda *args: overrides.append(args),
     )
     monkeypatch.setattr("tools.terminal_tool.terminal_tool", terminal_tool)
     monkeypatch.setattr(
@@ -350,22 +352,22 @@ def test_pro_worker_setup_resets_app_without_assuming_conda(monkeypatch):
     assert commands[0]["workdir"] == "/app"
     assert "git -C /app reset --hard" in commands[0]["command"]
     assert "conda" not in commands[0]["command"]
+    assert overrides == [("pro-setup", {"cwd": "/app"})]
 
 
-def test_pro_phase_prompt_contains_public_contract_and_handoffs():
+def test_pro_prompt_and_native_delegation_contract_are_complete():
     row = benchmark.parse_swebench_pro_row(make_raw_row())
-    prompt = pro_worker.phase_user_prompt(
-        "patcher",
-        row,
-        [{"phase": "navigator", "report": "inspect parser.py"}],
-        include_hints=False,
-    )
+    prompt = benchmark.build_prompt(row)
+    system = pro_worker.COORDINATOR_SYSTEM_PROMPT
 
     assert "SWE-bench Pro" in prompt
     assert "Worktree: /app" in prompt
     assert benchmark.format_problem_statement(row) in prompt
-    assert "Navigator handoff" in prompt
-    assert "inspect parser.py" in prompt
+    assert "native delegate_task" in system
+    assert "[benchmark-navigator]" in system
+    assert "[benchmark-patcher]" in system
+    assert "[benchmark-reviewer]" in system
+    assert "prior handoffs" in system
 
 
 def test_prediction_schema_and_manifest_record_parity(tmp_path):
@@ -391,6 +393,11 @@ def test_prediction_schema_and_manifest_record_parity(tmp_path):
     ]
     assert manifest["agentBudgets"] == {
         "coordinator": 24,
+        "nativeSubagent": 13,
+        "nativeSubagentCount": 3,
+    }
+    assert manifest["delegationMode"] == "native"
+    assert manifest["peerPhaseBudgetReference"] == {
         "navigator": 10,
         "patcher": 18,
         "reviewer": 12,
@@ -669,6 +676,11 @@ def test_inference_dry_run_resolves_defaults_without_docker_or_api(tmp_path, cap
     assert output["attemptsPerInstance"] == 1
     assert output["maxInfrastructureRetries"] == 0
     assert output["agentTimeoutSeconds"] == 1800
+    assert output["delegationMode"] == "native"
+    assert output["coordinatorBudget"] == 24
+    assert output["nativeSubagentBudget"] == 13
+    assert output["nativeSubagentCount"] == 3
+    assert output["nativeSubagentTotalBudget"] == 39
     assert output["images"] == [benchmark.official_image(DOCKERHUB_TAG)]
 
 

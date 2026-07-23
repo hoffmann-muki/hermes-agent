@@ -39,6 +39,11 @@ DEFAULT_CONCURRENCY = 1
 DEFAULT_INFRASTRUCTURE_RETRIES = 0
 DEFAULT_COORDINATOR_BUDGET = 24
 DEFAULT_PHASE_BUDGETS = {"navigator": 10, "patcher": 18, "reviewer": 12}
+DEFAULT_DELEGATION_MODE = "native"
+DEFAULT_NATIVE_SUBAGENT_COUNT = len(DEFAULT_PHASE_BUDGETS)
+DEFAULT_NATIVE_SUBAGENT_BUDGET = (
+    sum(DEFAULT_PHASE_BUDGETS.values()) // DEFAULT_NATIVE_SUBAGENT_COUNT
+)
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_API_MAX_RETRIES = 1
 AGENT_TOPOLOGY = "supervisor-delegation"
@@ -474,7 +479,10 @@ def manifest(
         "agentTopology": AGENT_TOPOLOGY,
         "agentSequence": ["coordinator", *DEFAULT_PHASE_BUDGETS],
         "coordinatorBudget": DEFAULT_COORDINATOR_BUDGET,
-        "phaseBudgets": DEFAULT_PHASE_BUDGETS,
+        "delegationMode": DEFAULT_DELEGATION_MODE,
+        "nativeSubagentBudget": DEFAULT_NATIVE_SUBAGENT_BUDGET,
+        "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
+        "peerPhaseBudgetReference": DEFAULT_PHASE_BUDGETS,
         "apiMaxRetries": DEFAULT_API_MAX_RETRIES,
         "hermesVersion": options.hermes_version,
         "hermesRepository": options.hermes_repository,
