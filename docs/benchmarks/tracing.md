@@ -45,6 +45,8 @@ execution and finalized into size-bounded gzip chunks. Every record keeps its
 sequence, timestamp, source, identity, and canonical-event links; chunking
 changes only physical storage and never samples or coalesces deltas. Many
 `native/index.jsonl` rows can therefore share one content-addressed artifact.
+Chunk artifacts are the only valid native-evidence representation; loose
+per-record artifacts are outside the shared trace contract.
 On filesystems with hard-link support, finalized `journal.jsonl` and
 `events.jsonl` also share one inode, with an atomic-copy fallback.
 

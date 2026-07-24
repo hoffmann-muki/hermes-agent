@@ -20,7 +20,7 @@ from uuid import uuid4
 
 SCHEMA_VERSION = "benchmark-trace/v1"
 CONTRACT_VERSION = "1.0.0"
-SCHEMA_DIGEST = "ac1a30ab8981f4dd0f0260bedc48fde8b8bd3d6627c167e7ab29331fac897cb7"
+SCHEMA_DIGEST = "8d58396efde1e27da6da87c1008aa16d9ab6ee154c855087dd51fad41cc8ab18"
 NATIVE_CHUNK_MEDIA_TYPE = "application/vnd.benchmark-trace.native-records+jsonl+gzip"
 NATIVE_JOURNAL_FORMAT = "benchmark-trace/native-journal-v1"
 NATIVE_CHUNK_TARGET_BYTES = 1024 * 1024
