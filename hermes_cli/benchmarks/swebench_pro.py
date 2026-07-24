@@ -564,9 +564,7 @@ def _manifest(
         "agentBudgets": {
             "coordinator": swebench_verified.DEFAULT_COORDINATOR_BUDGET,
             "nativeSubagent": swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET,
-            "nativeSubagentCount": (
-                swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT
-            ),
+            "nativeSubagentCount": (swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT),
         },
         "delegationMode": swebench_verified.DEFAULT_DELEGATION_MODE,
         "peerPhaseBudgetReference": swebench_verified.DEFAULT_PHASE_BUDGETS,
@@ -674,9 +672,7 @@ def _expected_resume_contract(
         "agentBudgets": {
             "coordinator": swebench_verified.DEFAULT_COORDINATOR_BUDGET,
             "nativeSubagent": swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET,
-            "nativeSubagentCount": (
-                swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT
-            ),
+            "nativeSubagentCount": (swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT),
         },
         "delegationMode": swebench_verified.DEFAULT_DELEGATION_MODE,
         "peerPhaseBudgetReference": swebench_verified.DEFAULT_PHASE_BUDGETS,
@@ -811,9 +807,7 @@ def run_inference(
                     "setupTimeoutSeconds": options.setup_timeout_seconds,
                     "sequence": list(swebench_verified.DEFAULT_AGENT_SEQUENCE),
                     "delegationMode": swebench_verified.DEFAULT_DELEGATION_MODE,
-                    "coordinatorBudget": (
-                        swebench_verified.DEFAULT_COORDINATOR_BUDGET
-                    ),
+                    "coordinatorBudget": (swebench_verified.DEFAULT_COORDINATOR_BUDGET),
                     "nativeSubagentBudget": (
                         swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET
                     ),
@@ -869,9 +863,7 @@ def run_inference(
     swebench_verified.require_unchanged_source(frozen_options)
     trace_run = None
     if options.trace_dir is not None:
-        source_identity = swebench_verified._source_identity_for_options(
-            frozen_options
-        )
+        source_identity = swebench_verified._source_identity_for_options(frozen_options)
         if (
             source_identity["dirty"] is not False
             or not isinstance(source_identity["commit"], str)
@@ -923,6 +915,7 @@ def run_inference(
                     worker_module="hermes_cli.benchmarks.swebench_pro_worker",
                     prompt_builder=build_prompt,
                     worktree="/app",
+                    evaluation_timeout_seconds=DEFAULT_EVALUATION_TIMEOUT_SECONDS,
                     trace_run=trace_run,
                 )
         except Exception as exc:
@@ -973,9 +966,7 @@ def run_inference(
                     TraceSelection(
                         instance_ids=tuple(row.instance_id for row in rows),
                         strategy=(
-                            "explicit_ids"
-                            if options.instance_ids
-                            else "ordered_window"
+                            "explicit_ids" if options.instance_ids else "ordered_window"
                         ),
                     )
                 ),

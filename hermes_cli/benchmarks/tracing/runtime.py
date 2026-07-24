@@ -161,6 +161,25 @@ _CREDENTIAL_FIELDS = {
     "secretkey",
     "signedcredential",
 }
+_CREDENTIAL_FIELD_SUFFIXES = (
+    "apikey",
+    "accesskey",
+    "accesstoken",
+    "authorization",
+    "authorizationheader",
+    "authtoken",
+    "clientsecret",
+    "cookie",
+    "credentials",
+    "githubtoken",
+    "password",
+    "privatekey",
+    "refreshtoken",
+    "secret",
+    "secretaccesskey",
+    "secretkey",
+    "signedcredential",
+)
 _ACCOUNTING_FIELDS = {
     "accumulatedcost",
     "accumulatedtokenusage",
@@ -187,6 +206,14 @@ _ACCOUNTING_FIELDS = {
     "usagesummary",
     "usagetometrics",
 }
+_ACCOUNTING_FIELD_SUFFIXES = tuple(_ACCOUNTING_FIELDS)
+_CREDENTIAL_NAME_PATTERN = (
+    r"(?:[A-Za-z_][A-Za-z0-9_-]*?)?"
+    r"(?:api[_-]?key|access[_-]?key|access[_-]?token|auth[_-]?token|"
+    r"authorization(?:[_-]?header)?|client[_-]?secret|cookie|credentials|"
+    r"github[_-]?token|password|private[_-]?key|refresh[_-]?token|"
+    r"secret(?:[_-]?access)?[_-]?key|secret|signed[_-]?credential)"
+)
 _PATTERN_RULES = (
     _PatternRule(
         "credential.private_key",
@@ -226,21 +253,20 @@ _PATTERN_RULES = (
             re.IGNORECASE,
         ),
         lambda match: (
-            f"{match.group('scheme')}{match.group('username')}:"
-            "<redacted:uri_password>@"
+            f"{match.group('scheme')}{match.group('username')}:<redacted:uri_password>@"
         ),
     ),
     _PatternRule(
         "credential.assignment",
         re.compile(
-            r"(?i)\b(?P<name>"
-            r"api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|"
-            r"github[_-]?token|password|private[_-]?key|refresh[_-]?token|"
-            r"secret[_-]?key"
-            r")\s*=\s*(?!<redacted:)"
+            rf"(?i)(?<![A-Za-z0-9_])(?P<option>--?)?"
+            rf"(?P<name>{_CREDENTIAL_NAME_PATTERN})"
+            r"\s*(?:=|\s)\s*(?!<redacted:)"
             r"(?P<quote>['\"]?)(?P<value>[^\s'\"]{4,})(?P=quote)"
         ),
-        lambda match: f"{match.group('name')}=<redacted:assignment>",
+        lambda match: (
+            f"{match.group('option') or ''}{match.group('name')}=<redacted:assignment>"
+        ),
     ),
 )
 
@@ -270,10 +296,18 @@ class _Redactor:
                 for key, item in raw.items():
                     name = str(key)
                     normalized = re.sub(r"[^a-z0-9]", "", name.lower())
-                    if normalized in _CREDENTIAL_FIELDS:
+                    if _matches_field(
+                        normalized,
+                        _CREDENTIAL_FIELDS,
+                        _CREDENTIAL_FIELD_SUFFIXES,
+                    ):
                         add("field.credential")
                         continue
-                    if normalized in _ACCOUNTING_FIELDS:
+                    if _matches_field(
+                        normalized,
+                        _ACCOUNTING_FIELDS,
+                        _ACCOUNTING_FIELD_SUFFIXES,
+                    ):
                         add("field.accounting")
                         continue
                     result[name] = walk(item)
@@ -291,6 +325,16 @@ class _Redactor:
     def sanitize_text(self, value: str) -> _RedactionResult:
         result = self.sanitize(value)
         return _RedactionResult(str(result.value), result.matches, result.rules)
+
+
+def _matches_field(
+    normalized: str,
+    exact: set[str],
+    suffixes: tuple[str, ...],
+) -> bool:
+    return normalized in exact or any(
+        normalized != suffix and normalized.endswith(suffix) for suffix in suffixes
+    )
 
 
 def utc_now() -> str:
@@ -418,6 +462,7 @@ class TraceRecorder:
         self._artifacts: dict[str, JsonObject] = {}
         self._issues: dict[str, JsonObject] = {}
         self._redactions = 0
+        self._dropped_events = 0
         self._lock = threading.RLock()
         self._finalized: TraceFinalization | None = None
         self._events: _Journal | None = None
@@ -430,6 +475,7 @@ class TraceRecorder:
             _ensure_private_directory(config.attempt_dir / "artifacts" / "sha256")
             self._events = _Journal(config.attempt_dir / "journal.jsonl")
             self._native = _Journal(config.attempt_dir / "native" / "index.jsonl")
+            self._write_preflight()
         except (OSError, TypeError, ValueError, TraceStorageError) as exc:
             for journal in (self._events, self._native):
                 if journal is None:
@@ -453,18 +499,18 @@ class TraceRecorder:
     def _prepare_config(self) -> None:
         identity = self.identity
         if (
-            not all(
-                (
-                    identity.trace_id,
-                    identity.run_id,
-                    identity.benchmark,
-                    identity.framework,
-                    identity.instance_id,
-                )
-            )
+            not all((
+                identity.trace_id,
+                identity.run_id,
+                identity.benchmark,
+                identity.framework,
+                identity.instance_id,
+            ))
             or identity.attempt < 1
         ):
             raise ValueError("Trace identity is incomplete")
+        if self._redactor.sanitize(identity.event_fields()).matches:
+            raise ValueError("Trace identity contains credential-like material")
         categories = [item.category for item in self._config.capabilities]
         if len(categories) != len(set(categories)) or set(categories) != set(
             CAPABILITY_CATEGORIES
@@ -476,17 +522,19 @@ class TraceRecorder:
         self._producer = producer.value
         self._provenance = provenance.value
         self._execution = execution.value
-        self._capabilities = tuple(
-            self._redactor.sanitize(item.as_json()).value
+        capabilities = [
+            self._redactor.sanitize(item.as_json())
             for item in self._config.capabilities
-        )
+        ]
+        self._capabilities = tuple(item.value for item in capabilities)
         self._redactions += (
-            producer.matches + provenance.matches + execution.matches
+            producer.matches
+            + provenance.matches
+            + execution.matches
+            + sum(item.matches for item in capabilities)
         )
 
-    def report_issue(
-        self, code: str, message: str, *, severity: str = "error"
-    ) -> None:
+    def report_issue(self, code: str, message: str, *, severity: str = "error") -> None:
         with self._lock:
             timestamp = utc_now()
             safe_code = (
@@ -515,23 +563,41 @@ class TraceRecorder:
 
     def update_capabilities(self, capabilities: tuple[Capability, ...]) -> bool:
         with self._lock:
+            previous = self._capabilities
             try:
                 categories = [item.category for item in capabilities]
                 if len(categories) != len(set(categories)) or set(categories) != set(
                     CAPABILITY_CATEGORIES
                 ):
                     raise ValueError("Capability matrix is incomplete")
-                self._capabilities = tuple(
-                    self._redactor.sanitize(item.as_json()).value
-                    for item in capabilities
-                )
+                sanitized = [
+                    self._redactor.sanitize(item.as_json()) for item in capabilities
+                ]
+                self._capabilities = tuple(item.value for item in sanitized)
+                self._write_preflight()
+                self._redactions += sum(item.matches for item in sanitized)
                 return True
-            except (TypeError, ValueError):
+            except (OSError, TypeError, ValueError, TraceStorageError):
+                self._capabilities = previous
                 self.report_issue(
                     "capabilities.update_failed",
                     "Hermes submitted an invalid observed capability matrix",
                 )
                 return False
+
+    def _write_preflight(self) -> None:
+        _atomic_write(
+            self.attempt_dir / "preflight.json",
+            canonical_json({
+                "format": "benchmark-trace/preflight-v1",
+                "created_at": self._created_at,
+                "identity": self.identity.event_fields(),
+                "producer": dict(self._producer),
+                "provenance": dict(self._provenance),
+                "execution": dict(self._execution),
+                "capabilities": [dict(capability) for capability in self._capabilities],
+            }),
+        )
 
     def store_text_artifact(
         self, value: str, *, role: str, media_type: str = "text/plain"
@@ -601,9 +667,7 @@ class TraceRecorder:
                     "encoding": encoding,
                     "role": role,
                     "redaction": {
-                        "status": "applied"
-                        if redaction.matches
-                        else "not_required",
+                        "status": "applied" if redaction.matches else "not_required",
                         "matches": redaction.matches,
                         "rules": list(redaction.rules),
                     },
@@ -642,6 +706,7 @@ class TraceRecorder:
     ) -> str | None:
         with self._lock:
             if self._finalized is not None:
+                self._dropped_events += 1
                 self.report_issue(
                     "trace.record_after_finalize",
                     "An event was submitted after trace finalization",
@@ -649,6 +714,7 @@ class TraceRecorder:
                 return None
             candidate = event_id or f"event-{uuid4().hex}"
             if candidate in self._event_ids:
+                self._dropped_events += 1
                 self.report_issue(
                     "event.duplicate_id", "A duplicate Hermes trace event was rejected"
                 )
@@ -659,6 +725,7 @@ class TraceRecorder:
                 or (phase == "start" and status != "started")
                 or (phase == "instant" and status == "started")
             ):
+                self._dropped_events += 1
                 self.report_issue(
                     "event.invalid", "An invalid normalized Hermes event was rejected"
                 )
@@ -681,6 +748,28 @@ class TraceRecorder:
                 )
                 if value is not None
             }
+            identity_check = self._redactor.sanitize({
+                "event_id": candidate,
+                "span_id": span_id,
+                **identifiers,
+            })
+            if identity_check.matches:
+                self._dropped_events += 1
+                self.report_issue(
+                    "event.sensitive_identity",
+                    "A Hermes trace event identity contained credential-like material",
+                )
+                return None
+            if any(
+                self._artifacts.get(str(reference.get("path"))) != reference
+                for reference in artifacts
+            ):
+                self._dropped_events += 1
+                self.report_issue(
+                    "event.unknown_artifact",
+                    "A Hermes event referenced an artifact not owned by this recorder",
+                )
+                return None
             event: JsonObject = {
                 "schema_version": SCHEMA_VERSION,
                 "schema_digest": SCHEMA_DIGEST,
@@ -703,14 +792,13 @@ class TraceRecorder:
             if sanitized_error is not None:
                 event["error"] = sanitized_error.value
             if relations:
-                event["relations"] = [
-                    item.value for item in sanitized_relations
-                ]
+                event["relations"] = [item.value for item in sanitized_relations]
             try:
                 if self._events is None:
                     raise TraceStorageError("Event journal is unavailable")
                 self._events.append(event)
             except TraceStorageError:
+                self._dropped_events += 1
                 self.report_issue(
                     "journal.append_failed",
                     "A Hermes trace event could not be durably appended",
@@ -739,6 +827,14 @@ class TraceRecorder:
         with self._lock:
             if self._finalized is not None:
                 return None
+            sanitized_source = self._redactor.sanitize_text(source)
+            identity_check = self._redactor.sanitize(list(event_ids))
+            if identity_check.matches:
+                self.report_issue(
+                    "native.sensitive_identity",
+                    "A Hermes native record identity contained credential-like material",
+                )
+                return None
             artifact = (
                 self.store_text_artifact(content, role=role, media_type=media_type)
                 if isinstance(content, str)
@@ -755,7 +851,7 @@ class TraceRecorder:
                 "trace_id": self.identity.trace_id,
                 "framework": self.identity.framework,
                 "recorded_at": utc_now(),
-                "source": self._redactor.sanitize_text(source).value,
+                "source": sanitized_source.value,
                 "artifact": artifact,
                 "event_ids": list(dict.fromkeys(event_ids)),
             }
@@ -771,6 +867,7 @@ class TraceRecorder:
                 return None
             self._native_sequence += 1
             self._native_ids.add(candidate)
+            self._redactions += sanitized_source.matches
             return candidate
 
     def finalize(self) -> TraceFinalization:
@@ -788,7 +885,10 @@ class TraceRecorder:
                     raise TraceStorageError("Hermes trace journal has a torn record")
                 _atomic_write(self.attempt_dir / "events.jsonl", content)
                 finalized_at = utc_now()
-                healthy = not self._issues
+                failed = any(
+                    issue.get("severity") == "error" for issue in self._issues.values()
+                )
+                healthy = not self._issues and self._dropped_events == 0
                 capabilities = {
                     "schema_version": SCHEMA_VERSION,
                     "schema_digest": SCHEMA_DIGEST,
@@ -802,7 +902,9 @@ class TraceRecorder:
                     "schema_digest": SCHEMA_DIGEST,
                     "trace_id": self.identity.trace_id,
                     "generated_at": finalized_at,
-                    "status": "healthy" if healthy else "degraded",
+                    "status": (
+                        "healthy" if healthy else "failed" if failed else "degraded"
+                    ),
                     "finalization": "clean" if healthy else "partial",
                     "failure_policy": "continue_agent_without_retry",
                     "agent_outcome_affected": False,
@@ -811,11 +913,10 @@ class TraceRecorder:
                         "events_written": self._event_sequence,
                         "artifacts_written": len(self._artifacts),
                         "artifact_bytes_written": sum(
-                            int(item["size_bytes"])
-                            for item in self._artifacts.values()
+                            int(item["size_bytes"]) for item in self._artifacts.values()
                         ),
                         "redactions_applied": self._redactions,
-                        "dropped_events": 0,
+                        "dropped_events": self._dropped_events,
                         "sequence_gaps": 0,
                     },
                     "issues": list(self._issues.values()),
@@ -847,9 +948,7 @@ class TraceRecorder:
                     self.attempt_dir / "capabilities.json",
                     canonical_json(capabilities),
                 )
-                _atomic_write(
-                    self.attempt_dir / "health.json", canonical_json(health)
-                )
+                _atomic_write(self.attempt_dir / "health.json", canonical_json(health))
                 _atomic_write(
                     self.attempt_dir / "manifest.json", canonical_json(manifest)
                 )
@@ -867,7 +966,10 @@ class TraceRecorder:
 
 
 def encode_instance_id(instance_id: str) -> str:
-    return quote(instance_id, safe="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-")
+    return quote(
+        instance_id,
+        safe="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-",
+    )
 
 
 def attempt_directory(root: Path, instance_id: str, attempt: int) -> Path:
@@ -891,8 +993,7 @@ def write_run_index(
             (
                 path
                 for path in instance_root.glob("attempt-*")
-                if path.is_dir()
-                and path.name.removeprefix("attempt-").isdigit()
+                if path.is_dir() and path.name.removeprefix("attempt-").isdigit()
             ),
             key=lambda path: int(path.name.removeprefix("attempt-")),
         )
@@ -932,15 +1033,13 @@ def write_run_index(
             )
             if not isinstance(health, dict) or health.get("status") != "healthy":
                 status = "degraded"
-            attempts.append(
-                {
-                    "trace_id": manifest["trace_id"],
-                    "instance_id": instance_id,
-                    "attempt": manifest["attempt"],
-                    "path": attempt_dir.relative_to(root).as_posix(),
-                    "status": status,
-                }
-            )
+            attempts.append({
+                "trace_id": manifest["trace_id"],
+                "instance_id": instance_id,
+                "attempt": manifest["attempt"],
+                "path": attempt_dir.relative_to(root).as_posix(),
+                "status": status,
+            })
     document = {
         "schema_version": SCHEMA_VERSION,
         "contract": {

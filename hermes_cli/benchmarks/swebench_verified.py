@@ -1033,6 +1033,7 @@ def _run_worker(
     worker_module: str = "hermes_cli.benchmarks.swebench_verified_worker",
     prompt_builder: Callable[..., str] = build_prompt,
     worktree: str = "/testbed",
+    evaluation_timeout_seconds: int = DEFAULT_EVALUATION_TIMEOUT_SECONDS,
     trace_run: TraceRunOptions | None = None,
 ) -> dict[str, Any]:
     instance_dir.mkdir(parents=True, exist_ok=True)
@@ -1077,6 +1078,7 @@ def _run_worker(
             "createdAt": trace_run.created_at,
             "benchmark": trace_run.benchmark,
             "frameworkRevision": _source_identity_for_options(options)["commit"],
+            "evaluationTimeoutSeconds": evaluation_timeout_seconds,
         }
     atomic_write_json(request_path, request)
 
@@ -1637,8 +1639,7 @@ def run_inference(
                     "nativeSubagentBudget": DEFAULT_NATIVE_SUBAGENT_BUDGET,
                     "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
                     "nativeSubagentTotalBudget": (
-                        DEFAULT_NATIVE_SUBAGENT_BUDGET
-                        * DEFAULT_NATIVE_SUBAGENT_COUNT
+                        DEFAULT_NATIVE_SUBAGENT_BUDGET * DEFAULT_NATIVE_SUBAGENT_COUNT
                     ),
                     "peerPhaseBudgetReference": DEFAULT_PHASE_BUDGETS,
                     "images": [
@@ -1705,9 +1706,7 @@ def run_inference(
             image_metadata["docker"] = docker_metadata
             require_unchanged_source(options)
             if trace_run is None:
-                result = _run_worker(
-                    options, row, instance_dir, image, image_metadata
-                )
+                result = _run_worker(options, row, instance_dir, image, image_metadata)
             else:
                 result = _run_worker(
                     options,
@@ -1761,9 +1760,7 @@ def run_inference(
                     TraceSelection(
                         instance_ids=tuple(row.instance_id for row in rows),
                         strategy=(
-                            "explicit_ids"
-                            if options.instance_ids
-                            else "ordered_window"
+                            "explicit_ids" if options.instance_ids else "ordered_window"
                         ),
                     )
                 ),

@@ -54,7 +54,9 @@ def create_hermes_attempt_trace(
     model: str,
     agent_timeout_seconds: int | float,
     evaluation_workers: int,
+    evaluation_timeout_seconds: int | float | None = None,
     benchmark_retries: int = 0,
+    delegation_enabled: bool = True,
     harness_revision: str | None = None,
     agent_image: str | None = None,
 ) -> HermesTraceAdapter:
@@ -70,6 +72,14 @@ def create_hermes_attempt_trace(
         or not model
         or evaluation_workers < 1
         or agent_timeout_seconds <= 0
+        or (
+            evaluation_timeout_seconds is not None
+            and (
+                isinstance(evaluation_timeout_seconds, bool)
+                or not isinstance(evaluation_timeout_seconds, int | float)
+                or evaluation_timeout_seconds <= 0
+            )
+        )
         or benchmark_retries < 0
     ):
         raise ValueError("Hermes trace attempt metadata is invalid")
@@ -117,13 +127,18 @@ def create_hermes_attempt_trace(
                 "model": model,
                 "evaluation_workers": evaluation_workers,
                 "inference_timeout_seconds": agent_timeout_seconds,
+                **(
+                    {"evaluation_timeout_seconds": evaluation_timeout_seconds}
+                    if evaluation_timeout_seconds is not None
+                    else {}
+                ),
                 "benchmark_retries": benchmark_retries,
                 "provider_attempts": 1,
             },
             capabilities=hermes_capabilities({}),
         )
     )
-    return HermesTraceAdapter(recorder)
+    return HermesTraceAdapter(recorder, delegation_enabled=delegation_enabled)
 
 
 def finalize_hermes_trace_run(

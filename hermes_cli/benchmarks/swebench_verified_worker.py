@@ -207,8 +207,7 @@ def configure_worker(request: dict[str, Any]) -> None:
     # agent deadline. This existing internal runtime knob is scoped to the
     # disposable worker process; the controller remains the hard wall clock.
     os.environ["HERMES_CONCURRENT_TOOL_TIMEOUT_S"] = str(
-        int(request["agentTimeoutSeconds"])
-        + DELEGATION_TOOL_TIMEOUT_GRACE_SECONDS
+        int(request["agentTimeoutSeconds"]) + DELEGATION_TOOL_TIMEOUT_GRACE_SECONDS
     )
     config = _terminal_config(request)
     config_path = hermes_home / "config.yaml"
@@ -347,7 +346,9 @@ def default_agent_factory(
     from run_agent import AIAgent
 
     if role != "coordinator":
-        raise BenchmarkError("Native benchmark delegation only constructs a coordinator")
+        raise BenchmarkError(
+            "Native benchmark delegation only constructs a coordinator"
+        )
     return AIAgent(
         base_url=OPENROUTER_BASE_URL,
         api_key=api_key,
@@ -381,6 +382,9 @@ def create_trace_adapter(request: dict[str, Any]) -> Any | None:
         or not isinstance(value.get("runRoot"), str)
         or not isinstance(value.get("createdAt"), str)
         or not isinstance(value.get("frameworkRevision"), str)
+        or isinstance(value.get("evaluationTimeoutSeconds"), bool)
+        or not isinstance(value.get("evaluationTimeoutSeconds"), int | float)
+        or value["evaluationTimeoutSeconds"] <= 0
     ):
         raise BenchmarkError("Worker trace request has an invalid schema")
     from hermes_cli.benchmarks.tracing import (
@@ -401,6 +405,7 @@ def create_trace_adapter(request: dict[str, Any]) -> Any | None:
         model=request["model"],
         agent_timeout_seconds=int(request["agentTimeoutSeconds"]),
         evaluation_workers=1,
+        evaluation_timeout_seconds=value["evaluationTimeoutSeconds"],
     )
 
 
@@ -433,8 +438,7 @@ def _runtime_metadata(request: dict[str, Any], env: Any) -> dict[str, Any]:
         "credentialEnvironmentNames": ["OPENROUTER_API_KEY"],
         "dockerForwardEnvironment": [],
         "delegationToolTimeoutSeconds": (
-            int(request["agentTimeoutSeconds"])
-            + DELEGATION_TOOL_TIMEOUT_GRACE_SECONDS
+            int(request["agentTimeoutSeconds"]) + DELEGATION_TOOL_TIMEOUT_GRACE_SECONDS
         ),
         "delegationMode": DEFAULT_DELEGATION_MODE,
         "nativeSubagentBudget": NATIVE_SUBAGENT_BUDGET,
@@ -484,14 +488,12 @@ def run_worker(
         runtime_metadata = _runtime_metadata(request, env)
         atomic_write_json(Path(request["runtimePath"]), runtime_metadata)
         if trace_adapter is not None:
-            trace_adapter.container_observed(
-                {
-                    "container_id": runtime_metadata["containerId"],
-                    "image": request["image"],
-                    "docker_platform": request["dockerPlatform"],
-                    "worktree": WORKTREE,
-                }
-            )
+            trace_adapter.container_observed({
+                "container_id": runtime_metadata["containerId"],
+                "image": request["image"],
+                "docker_platform": request["dockerPlatform"],
+                "worktree": WORKTREE,
+            })
         if termination_requested.is_set():
             raise BenchmarkError("Worker terminated during setup")
 
@@ -533,9 +535,7 @@ def run_worker(
             signal.signal(signal.SIGTERM, previous_sigterm)
             signal.signal(signal.SIGINT, previous_sigint)
 
-    records, audit_errors = audit_native_delegations(
-        coordinator_result.get("messages")
-    )
+    records, audit_errors = audit_native_delegations(coordinator_result.get("messages"))
     workflow_complete = reconciled_workflow(
         records, audit_errors, coordinator_result, error
     )

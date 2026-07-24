@@ -84,6 +84,31 @@ def test_generic_coordinator_supports_an_arbitrary_benchmark(tmp_path):
     assert document["selection"]["instance_ids"] == ["custom-instance"]
 
 
+def test_error_level_trace_issue_marks_attempt_failed_and_partial(tmp_path):
+    run = create_hermes_trace_run(tmp_path / "traces", "swe-bench-verified")
+    adapter = create_hermes_attempt_trace(
+        run=run,
+        instance_id=INSTANCE,
+        attempt=1,
+        framework_revision=REVISION,
+        model=MODEL,
+        agent_timeout_seconds=1800,
+        evaluation_workers=1,
+    )
+    adapter.start_session("task-coordinator")
+    adapter.on_tool_complete("missing", "terminal", {}, "no result")
+
+    result = adapter.finish("completed", messages=[])
+    health = json.loads(
+        (Path(result.attempt_dir) / "health.json").read_text(encoding="utf-8")
+    )
+
+    assert result.health == "failed"
+    assert result.complete is False
+    assert health["status"] == "failed"
+    assert health["finalization"] == "partial"
+
+
 def test_harbor_job_lock_preserves_resolved_task_order(tmp_path):
     job = tmp_path / "jobs" / "run"
     job.mkdir(parents=True)
@@ -255,7 +280,13 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
     adapter.on_tool_start(
         "call-1",
         "terminal",
-        {"command": "find . -maxdepth 1", "api_key": "must-not-persist"},
+        {
+            "command": (
+                "OPENROUTER_API_KEY=synthetic-secret-value "
+                "--custom-access-token synthetic-token-value"
+            ),
+            "OPENROUTER_API_KEY": "must-not-persist",
+        },
     )
     adapter.on_tool_progress(
         "tool.completed",
@@ -267,7 +298,14 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
     adapter.on_tool_complete(
         "call-1",
         "terminal",
-        {"command": "find . -maxdepth 1", "api_key": "must-not-persist"},
+        {
+            "command": (
+                "OPENROUTER_API_KEY=synthetic-secret-value "
+                "--custom-access-token synthetic-token-value"
+            ),
+            "OPENROUTER_API_KEY": "must-not-persist",
+            "provider_usage": {"input_tokens": 10},
+        },
         "./a.py\n./b.py\n",
     )
     child = {
@@ -334,6 +372,12 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
     events = _read_jsonl(attempt_dir / "events.jsonl")
     event_types = [event["event_type"] for event in events]
     assert event_types[:3] == ["instance.start", "attempt.start", "harness.start"]
+    assert events[1]["payload"]["agent_configuration"] == {
+        "delegation_enabled": True,
+        "coordination_mode": "framework_native",
+        "delegation_sequence": ["navigator", "patcher", "reviewer"],
+        "sequence_enforcement": "prompt_guided",
+    }
     assert {
         "agent.session_start",
         "container.observed",
@@ -376,6 +420,9 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
         if path.is_file()
     )
     assert "must-not-persist" not in retained
+    assert "synthetic-secret-value" not in retained
+    assert "synthetic-token-value" not in retained
+    assert '"provider_usage"' not in retained
     assert '"usage"' not in retained
     assert '"total_tokens"' not in retained
     assert '"tokens"' not in retained
@@ -416,6 +463,7 @@ def test_worker_wires_trace_callbacks_without_a_model_call(tmp_path, monkeypatch
             "createdAt": run.created_at,
             "benchmark": run.benchmark,
             "frameworkRevision": REVISION,
+            "evaluationTimeoutSeconds": 3600,
         },
     }
     fake_environment = SimpleNamespace(_container_id="a" * 64)
@@ -477,6 +525,9 @@ def test_worker_wires_trace_callbacks_without_a_model_call(tmp_path, monkeypatch
     assert result["trace"]["traceHealth"] == "healthy"
     assert result["trace"]["traceComplete"] is True
     attempt_dir = Path(result["trace"]["traceDirectory"])
+    manifest = json.loads((attempt_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["execution"]["inference_timeout_seconds"] == 1800
+    assert manifest["execution"]["evaluation_timeout_seconds"] == 3600
     assert (attempt_dir / "manifest.json").is_file()
     assert "file.read" in {
         event["event_type"] for event in _read_jsonl(attempt_dir / "events.jsonl")

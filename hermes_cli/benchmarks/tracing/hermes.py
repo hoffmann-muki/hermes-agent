@@ -183,7 +183,12 @@ def hermes_capabilities(
 class HermesTraceAdapter:
     """Translate Hermes' public agent callbacks into normalized trace events."""
 
-    def __init__(self, recorder: TraceRecorder) -> None:
+    def __init__(
+        self,
+        recorder: TraceRecorder,
+        *,
+        delegation_enabled: bool,
+    ) -> None:
         self._recorder = recorder
         self._lock = threading.RLock()
         self._observed: dict[str, set[str]] = defaultdict(set)
@@ -198,11 +203,24 @@ class HermesTraceAdapter:
         self._instance_span = f"instance-{trace_id}"
         self._attempt_span = f"attempt-{trace_id}"
         self._harness_span = f"harness-{trace_id}"
+        self._record_lifecycle("instance.start", "instance", self._instance_span, None)
         self._record_lifecycle(
-            "instance.start", "instance", self._instance_span, None
-        )
-        self._record_lifecycle(
-            "attempt.start", "attempt", self._attempt_span, self._instance_span
+            "attempt.start",
+            "attempt",
+            self._attempt_span,
+            self._instance_span,
+            payload={
+                "agent_configuration": {
+                    "delegation_enabled": delegation_enabled,
+                    "coordination_mode": "framework_native",
+                    "delegation_sequence": (
+                        ["navigator", "patcher", "reviewer"]
+                        if delegation_enabled
+                        else []
+                    ),
+                    "sequence_enforcement": "prompt_guided",
+                }
+            },
         )
         self._record_lifecycle(
             "harness.start", "harness", self._harness_span, self._attempt_span
@@ -436,9 +454,7 @@ class HermesTraceAdapter:
                     if completion.is_error
                     else None
                 ),
-                relations=(
-                    {"type": "caused_by", "event_id": pending.start_event_id},
-                ),
+                relations=({"type": "caused_by", "event_id": pending.start_event_id},),
             )
             if event_id is None:
                 return
@@ -596,13 +612,14 @@ class HermesTraceAdapter:
                 return
             linked: list[tuple[str, str]] = []
             for index, message in enumerate(messages):
-                if not isinstance(message, Mapping) or message.get("role") != "assistant":
+                if (
+                    not isinstance(message, Mapping)
+                    or message.get("role") != "assistant"
+                ):
                     continue
                 content = message.get("content")
                 artifact = (
-                    self._recorder.store_text_artifact(
-                        content, role="model.response"
-                    )
+                    self._recorder.store_text_artifact(content, role="model.response")
                     if isinstance(content, str)
                     else self._recorder.store_json_artifact(
                         content, role="model.response"
@@ -744,9 +761,7 @@ class HermesTraceAdapter:
         )
         span_id = f"hermes-delegation-{subagent_id}"
         artifact = self._recorder.store_json_artifact(
-            _progress_payload(
-                "subagent.start", "", preview, None, metadata
-            ),
+            _progress_payload("subagent.start", "", preview, None, metadata),
             role="delegation.request",
         )
         event_id = self._record(
@@ -792,13 +807,9 @@ class HermesTraceAdapter:
             ((event_id, "delegation.start"),),
         )
 
-    def _subagent_complete(
-        self, preview: Any, metadata: Mapping[str, Any]
-    ) -> None:
+    def _subagent_complete(self, preview: Any, metadata: Mapping[str, Any]) -> None:
         subagent_id = str(
-            metadata.get("subagent_id")
-            or metadata.get("child_session_id")
-            or ""
+            metadata.get("subagent_id") or metadata.get("child_session_id") or ""
         )
         pending = self._subagents.pop(subagent_id, None)
         if pending is None:
@@ -879,9 +890,7 @@ class HermesTraceAdapter:
             status="completed",
             span_id=f"hermes-{family}-{self.identity.trace_id}-{time.monotonic_ns()}",
             parent_span_id=(
-                self._subagent_parent(metadata)
-                if metadata
-                else self._session_parent
+                self._subagent_parent(metadata) if metadata else self._session_parent
             ),
             session_id=(
                 _optional_string(metadata.get("child_session_id"))
@@ -960,7 +969,12 @@ class HermesTraceAdapter:
         self._subagents.pop(subagent_id, None)
 
     def _record_lifecycle(
-        self, event_type: str, family: str, span_id: str, parent_span_id: str | None
+        self,
+        event_type: str,
+        family: str,
+        span_id: str,
+        parent_span_id: str | None,
+        payload: JsonObject | None = None,
     ) -> None:
         self._record(
             event_type=event_type,
@@ -971,7 +985,7 @@ class HermesTraceAdapter:
             parent_span_id=parent_span_id,
             origin=_harness_origin(),
             timing={"fidelity": "derived"},
-            payload={},
+            payload=payload or {},
         )
 
     def _end_lifecycle(
@@ -996,7 +1010,8 @@ class HermesTraceAdapter:
             error=(
                 {
                     "code": "hermes.attempt_failed",
-                    "message": error_message or "Hermes benchmark attempt did not complete",
+                    "message": error_message
+                    or "Hermes benchmark attempt did not complete",
                 }
                 if status != "completed"
                 else None
@@ -1031,9 +1046,7 @@ class HermesTraceAdapter:
     def _subagent_parent(self, metadata: Mapping[str, Any] | None) -> str:
         if metadata:
             subagent_id = str(
-                metadata.get("subagent_id")
-                or metadata.get("child_session_id")
-                or ""
+                metadata.get("subagent_id") or metadata.get("child_session_id") or ""
             )
             pending = self._subagents.get(subagent_id)
             if pending:
@@ -1073,11 +1086,7 @@ def _classify_tool(name: str) -> tuple[str, str, str]:
 def _tool_group(name: str) -> str:
     normalized = name.strip().lower()
     return next(
-        (
-            group
-            for group, names in _TOOL_GROUPS.items()
-            if normalized in names
-        ),
+        (group for group, names in _TOOL_GROUPS.items() if normalized in names),
         "tool",
     )
 
