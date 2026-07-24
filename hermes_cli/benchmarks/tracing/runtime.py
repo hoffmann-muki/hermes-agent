@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import gzip
 import hashlib
 import json
 import os
@@ -18,6 +21,9 @@ from uuid import uuid4
 SCHEMA_VERSION = "benchmark-trace/v1"
 CONTRACT_VERSION = "1.0.0"
 SCHEMA_DIGEST = "ac1a30ab8981f4dd0f0260bedc48fde8b8bd3d6627c167e7ab29331fac897cb7"
+NATIVE_CHUNK_MEDIA_TYPE = "application/vnd.benchmark-trace.native-records+jsonl+gzip"
+NATIVE_JOURNAL_FORMAT = "benchmark-trace/native-journal-v1"
+NATIVE_CHUNK_TARGET_BYTES = 1024 * 1024
 DIRECTORY_MODE = 0o700
 FILE_MODE = 0o600
 CAPABILITY_CATEGORIES = (
@@ -401,6 +407,28 @@ def _atomic_write(path: Path, content: bytes) -> None:
         raise TraceStorageError(f"Could not write trace file: {path}") from exc
 
 
+def _replace_with_hard_link(source: Path, target: Path) -> None:
+    if source.is_symlink() or not source.is_file():
+        raise TraceStorageError(f"Trace link source is not a safe file: {source}")
+    temporary = target.parent / f".{target.name}.{uuid4().hex}.link"
+    try:
+        os.link(source, temporary, follow_symlinks=False)
+        temporary.chmod(FILE_MODE)
+        os.replace(temporary, target)
+        target.chmod(FILE_MODE)
+        descriptor = os.open(
+            target.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        _atomic_write(target, source.read_bytes())
+
+
 class _Journal:
     def __init__(self, path: Path) -> None:
         _ensure_private_directory(path.parent)
@@ -639,6 +667,7 @@ class TraceRecorder:
         media_type: str,
         encoding: str,
         redaction: _RedactionResult,
+        count_redactions: bool = True,
     ) -> JsonObject | None:
         with self._lock:
             if self._finalized is not None:
@@ -673,7 +702,8 @@ class TraceRecorder:
                     },
                 }
                 self._artifacts[relative] = reference
-                self._redactions += redaction.matches
+                if count_redactions:
+                    self._redactions += redaction.matches
                 return reference
             except (OSError, TraceStorageError):
                 self.report_issue(
@@ -828,32 +858,66 @@ class TraceRecorder:
             if self._finalized is not None:
                 return None
             sanitized_source = self._redactor.sanitize_text(source)
+            if (
+                not sanitized_source.value
+                or len(sanitized_source.value) > 256
+                or not media_type
+                or len(media_type) > 128
+                or not re.fullmatch(r"[a-z][a-z0-9._-]*", role)
+                or len(role) > 128
+            ):
+                self.report_issue(
+                    "native.invalid_metadata",
+                    "Hermes native evidence metadata is invalid",
+                )
+                return None
             identity_check = self._redactor.sanitize(list(event_ids))
-            if identity_check.matches:
+            if identity_check.matches or any(
+                not event_id or len(event_id) > 512 for event_id in event_ids
+            ):
                 self.report_issue(
                     "native.sensitive_identity",
                     "A Hermes native record identity contained credential-like material",
                 )
                 return None
-            artifact = (
-                self.store_text_artifact(content, role=role, media_type=media_type)
-                if isinstance(content, str)
-                else self.store_json_artifact(content, role=role, media_type=media_type)
-            )
-            if artifact is None:
-                return None
             candidate = f"native-{uuid4().hex}"
+            if isinstance(content, str):
+                retained = self._redactor.sanitize_text(content)
+                retained_bytes = retained.value.encode("utf-8")
+            else:
+                retained = self._redactor.sanitize(content)
+                try:
+                    retained_bytes = canonical_json(retained.value)
+                except TraceStorageError:
+                    self.report_issue(
+                        "native.serialization_failed",
+                        "Hermes native evidence could not be serialized",
+                    )
+                    return None
+            member = {
+                "native_record_id": candidate,
+                "content_sha256": hashlib.sha256(retained_bytes).hexdigest(),
+                "size_bytes": len(retained_bytes),
+                "media_type": media_type,
+                "encoding": "utf-8",
+                "role": role,
+                "redaction": {
+                    "status": "applied" if retained.matches else "not_required",
+                    "matches": retained.matches,
+                    "rules": list(retained.rules),
+                },
+                "content_base64": base64.b64encode(retained_bytes).decode("ascii"),
+            }
             record = {
-                "schema_version": SCHEMA_VERSION,
-                "schema_digest": SCHEMA_DIGEST,
+                "format": NATIVE_JOURNAL_FORMAT,
                 "native_record_id": candidate,
                 "sequence": self._native_sequence + 1,
                 "trace_id": self.identity.trace_id,
                 "framework": self.identity.framework,
                 "recorded_at": utc_now(),
                 "source": sanitized_source.value,
-                "artifact": artifact,
                 "event_ids": list(dict.fromkeys(event_ids)),
+                "member": member,
             }
             try:
                 if self._native is None:
@@ -867,7 +931,7 @@ class TraceRecorder:
                 return None
             self._native_sequence += 1
             self._native_ids.add(candidate)
-            self._redactions += sanitized_source.matches
+            self._redactions += sanitized_source.matches + retained.matches
             return candidate
 
     def finalize(self) -> TraceFinalization:
@@ -884,6 +948,15 @@ class TraceRecorder:
                 if content and not content.endswith(b"\n"):
                     raise TraceStorageError("Hermes trace journal has a torn record")
                 _atomic_write(self.attempt_dir / "events.jsonl", content)
+                _replace_with_hard_link(
+                    self.attempt_dir / "events.jsonl",
+                    journal,
+                )
+                native_index = self._pack_native_journal()
+                _atomic_write(
+                    self.attempt_dir / "native" / "index.jsonl",
+                    b"".join(canonical_json(record) for record in native_index),
+                )
                 finalized_at = utc_now()
                 failed = any(
                     issue.get("severity") == "error" for issue in self._issues.values()
@@ -963,6 +1036,188 @@ class TraceRecorder:
                 raise TraceStorageError(
                     "Hermes benchmark trace could not be finalized"
                 ) from exc
+
+    def _pack_native_journal(self) -> tuple[JsonObject, ...]:
+        path = self.attempt_dir / "native" / "index.jsonl"
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise TraceStorageError("Native trace journal is unreadable") from exc
+        if content and not content.endswith(b"\n"):
+            raise TraceStorageError("Native trace journal has a torn record")
+        records: list[JsonObject] = []
+        for line in content.splitlines():
+            try:
+                record = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise TraceStorageError("Native trace journal is malformed") from exc
+            if not isinstance(record, dict):
+                raise TraceStorageError("Native trace journal record is not an object")
+            _require_native_journal_record(record)
+            records.append(record)
+
+        chunks: list[list[JsonObject]] = []
+        current: list[JsonObject] = []
+        current_bytes = 0
+        for record in records:
+            member = _native_member(record)
+            size = len(canonical_json(member))
+            if current and current_bytes + size > NATIVE_CHUNK_TARGET_BYTES:
+                chunks.append(current)
+                current = []
+                current_bytes = 0
+            current.append(record)
+            current_bytes += size
+        if current:
+            chunks.append(current)
+
+        packed: list[JsonObject] = []
+        for chunk in chunks:
+            members = [_native_member(record) for record in chunk]
+            compressed = gzip.compress(
+                b"".join(canonical_json(member) for member in members),
+                compresslevel=6,
+                mtime=0,
+            )
+            redactions = [_native_redaction(member) for member in members]
+            matches = sum(int(value["matches"]) for value in redactions)
+            rules = tuple(
+                dict.fromkeys(
+                    str(rule)
+                    for value in redactions
+                    for rule in value["rules"]
+                    if isinstance(rule, str)
+                )
+            )
+            reference = self._store_artifact(
+                compressed,
+                role="native.chunk",
+                media_type=NATIVE_CHUNK_MEDIA_TYPE,
+                encoding="binary",
+                redaction=_RedactionResult(
+                    value=None,
+                    matches=matches,
+                    rules=rules,
+                ),
+                count_redactions=False,
+            )
+            if reference is None:
+                raise TraceStorageError("Native evidence chunk could not be retained")
+            packed.extend(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "schema_digest": SCHEMA_DIGEST,
+                    "native_record_id": record["native_record_id"],
+                    "sequence": record["sequence"],
+                    "trace_id": record["trace_id"],
+                    "framework": record["framework"],
+                    "recorded_at": record["recorded_at"],
+                    "source": record["source"],
+                    "artifact": reference,
+                    "event_ids": record["event_ids"],
+                }
+                for record in chunk
+            )
+        return tuple(packed)
+
+
+def _require_native_journal_record(record: JsonObject) -> None:
+    member = _native_member(record)
+    event_ids = record.get("event_ids")
+    sequence = record.get("sequence")
+    native_record_id = record.get("native_record_id")
+    trace_id = record.get("trace_id")
+    framework = record.get("framework")
+    recorded_at = record.get("recorded_at")
+    source = record.get("source")
+    if (
+        record.get("format") != NATIVE_JOURNAL_FORMAT
+        or not isinstance(native_record_id, str)
+        or not native_record_id
+        or len(native_record_id) > 512
+        or not isinstance(sequence, int)
+        or isinstance(sequence, bool)
+        or sequence < 1
+        or not isinstance(trace_id, str)
+        or not trace_id
+        or len(trace_id) > 512
+        or not isinstance(framework, str)
+        or not re.fullmatch(r"[a-z][a-z0-9._-]*", framework)
+        or not isinstance(recorded_at, str)
+        or not recorded_at
+        or not isinstance(source, str)
+        or not source
+        or len(source) > 256
+        or not isinstance(event_ids, list)
+        or any(
+            not isinstance(value, str) or not value or len(value) > 512
+            for value in event_ids
+        )
+        or member.get("native_record_id") != native_record_id
+    ):
+        raise TraceStorageError("Native trace journal record is malformed")
+
+
+def _native_member(record: JsonObject) -> JsonObject:
+    member = record.get("member")
+    if not isinstance(member, dict):
+        raise TraceStorageError("Native trace journal member is malformed")
+    redaction = _native_redaction(member)
+    content_base64 = member.get("content_base64")
+    native_record_id = member.get("native_record_id")
+    content_sha256 = member.get("content_sha256")
+    size = member.get("size_bytes")
+    media_type = member.get("media_type")
+    role = member.get("role")
+    if (
+        not isinstance(native_record_id, str)
+        or not native_record_id
+        or len(native_record_id) > 512
+        or not isinstance(content_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", content_sha256)
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 0
+        or not isinstance(media_type, str)
+        or not media_type
+        or len(media_type) > 128
+        or member.get("encoding") not in {"utf-8", "binary"}
+        or not isinstance(role, str)
+        or not re.fullmatch(r"[a-z][a-z0-9._-]*", role)
+        or len(role) > 128
+        or not isinstance(content_base64, str)
+    ):
+        raise TraceStorageError("Native trace journal member is malformed")
+    try:
+        content = base64.b64decode(content_base64, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise TraceStorageError("Native trace journal content is not base64") from exc
+    if len(content) != size or hashlib.sha256(content).hexdigest() != content_sha256:
+        raise TraceStorageError("Native trace journal content is corrupt")
+    matches = redaction["matches"]
+    assert isinstance(matches, int)
+    if (redaction["status"] == "applied") != (matches > 0):
+        raise TraceStorageError("Native redaction metadata is inconsistent")
+    return member
+
+
+def _native_redaction(member: JsonObject) -> JsonObject:
+    redaction = member.get("redaction")
+    if not isinstance(redaction, dict):
+        raise TraceStorageError("Native redaction metadata is malformed")
+    matches = redaction.get("matches")
+    rules = redaction.get("rules")
+    if (
+        redaction.get("status") not in {"applied", "not_required"}
+        or not isinstance(matches, int)
+        or isinstance(matches, bool)
+        or matches < 0
+        or not isinstance(rules, list)
+        or any(not isinstance(rule, str) for rule in rules)
+        or (matches > 0) != bool(rules)
+    ):
+        raise TraceStorageError("Native redaction metadata is malformed")
+    return redaction
 
 
 def encode_instance_id(instance_id: str) -> str:

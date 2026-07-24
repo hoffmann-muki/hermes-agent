@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Sequence, cast
@@ -28,6 +31,7 @@ from hermes_cli.benchmarks.tracing.harbor import (
     promote_harbor_trace_attempt,
     trace_instance_ids_from_job,
 )
+from hermes_cli.benchmarks.tracing.runtime import NATIVE_CHUNK_MEDIA_TYPE
 
 
 INSTANCE = "owner__repo-1"
@@ -428,6 +432,27 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
     assert '"tokens"' not in retained
     assert '"duration_ms":25' in retained
     assert '"cost_usd"' not in retained
+    native = _read_jsonl(attempt_dir / "native" / "index.jsonl")
+    native_paths = {record["artifact"]["path"] for record in native}
+    assert len(native_paths) == 1
+    assert native[0]["artifact"]["media_type"] == NATIVE_CHUNK_MEDIA_TYPE
+    members = [
+        json.loads(line)
+        for line in gzip.decompress(
+            (attempt_dir / next(iter(native_paths))).read_bytes()
+        ).splitlines()
+    ]
+    assert len(members) == len(native)
+    packed = b"\n".join(
+        base64.b64decode(member["content_base64"], validate=True) for member in members
+    ).decode("utf-8")
+    assert "must-not-persist" not in packed
+    assert "synthetic-secret-value" not in packed
+    assert '"usage"' not in packed
+    if os.name != "nt":
+        assert (attempt_dir / "events.jsonl").stat().st_ino == (
+            attempt_dir / "journal.jsonl"
+        ).stat().st_ino
     assert (run.root / "run.json").stat().st_mode & 0o777 == 0o600
 
 

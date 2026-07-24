@@ -40,6 +40,14 @@ SWE runners print the exact trace-run path. Terminal-Bench persists it in the
 benchmark manifest and prints it at completion. The selected base remains a
 stable discovery location containing finalized trace-run children.
 
+Framework-native records are sanitized into one durable internal journal during
+execution and finalized into size-bounded gzip chunks. Every record keeps its
+sequence, timestamp, source, identity, and canonical-event links; chunking
+changes only physical storage and never samples or coalesces deltas. Many
+`native/index.jsonl` rows can therefore share one content-addressed artifact.
+On filesystems with hard-link support, finalized `journal.jsonl` and
+`events.jsonl` also share one inode, with an atomic-copy fallback.
+
 ## Researcher tooling
 
 The canonical OpenHands-benchmarks environment provides one read-only
