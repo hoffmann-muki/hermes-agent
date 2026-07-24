@@ -37,6 +37,8 @@ DEFAULT_SMOKE_INSTANCE_ID = "scikit-learn__scikit-learn-13439"
 DEFAULT_MODEL = "openrouter/qwen/qwen3-coder-next"
 DEFAULT_IMAGE_TEMPLATE = "docker.io/swebench/sweb.eval.x86_64.{repo}_1776_{name}:latest"
 DEFAULT_OUTPUT_DIR = ".benchmark-runs/swe-bench-verified"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_TRACE_DIR = REPO_ROOT / ".benchmark-traces"
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
 DEFAULT_AGENT_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_SETUP_TIMEOUT_SECONDS = 10 * 60
@@ -2120,13 +2122,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     infer.add_argument("--restart", action="store_true")
     infer.add_argument("--dry-run", action="store_true")
-    infer.add_argument(
+    tracing = infer.add_mutually_exclusive_group()
+    tracing.add_argument(
         "--trace-dir",
         type=Path,
+        default=DEFAULT_TRACE_DIR,
         help=(
-            "Opt-in benchmark-trace/v1 output base; each invocation creates "
-            "a private trace run"
+            "Override the benchmark-trace/v1 output base "
+            f"(default: {DEFAULT_TRACE_DIR})"
         ),
+    )
+    tracing.add_argument(
+        "--no-trace",
+        action="store_const",
+        const=None,
+        dest="trace_dir",
+        help="Disable benchmark tracing for this inference run",
     )
 
     evaluate = subparsers.add_parser(

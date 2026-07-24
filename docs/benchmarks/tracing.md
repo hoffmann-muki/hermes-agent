@@ -28,15 +28,16 @@ capability matrix rather than inferred.
 
 ## Runtime collection
 
-Passing `--trace-dir <base-directory>` to a Hermes SWE-bench or Terminal-Bench
-inference command enables capture inside that benchmark process. The runner
-creates a private `trace-run-<uuid>` before provider work and the native
-callbacks record activity as the agent performs it. This is not post-hoc log
-extraction, and no collector command needs to run before, during, or after the
-benchmark.
+Hermes SWE-bench and Terminal-Bench inference commands enable capture by default
+beneath the repository-local `.benchmark-traces/` base. The runner creates a
+private `trace-run-<uuid>` before provider work and the native callbacks record
+activity as the agent performs it. Use `--trace-dir <base-directory>` to
+override the base or `--no-trace` for an intentional untraced run. This is not
+post-hoc log extraction, and no collector command needs to run before, during,
+or after the benchmark.
 
 SWE runners print the exact trace-run path. Terminal-Bench persists it in the
-benchmark manifest and prints it at completion. The supplied base remains a
+benchmark manifest and prints it at completion. The selected base remains a
 stable discovery location containing finalized trace-run children.
 
 ## Researcher tooling

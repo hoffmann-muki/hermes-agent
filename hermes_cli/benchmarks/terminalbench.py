@@ -57,6 +57,7 @@ DEFAULT_API_MAX_RETRIES = 1
 AGENT_TOPOLOGY = "supervisor-delegation"
 AGENT_IMPORT_PATH = "hermes_cli.benchmarks.terminalbench_harbor:BenchmarkHermes"
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_TRACE_DIR = REPO_ROOT / ".benchmark-traces"
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 LOG_TAIL_LINES = 200
 
@@ -229,13 +230,22 @@ Examples:
         help="Run all 89 tasks with at least five attempts and public upload",
     )
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
+    tracing = parser.add_mutually_exclusive_group()
+    tracing.add_argument(
         "--trace-dir",
         type=Path,
+        default=DEFAULT_TRACE_DIR,
         help=(
-            "Opt-in benchmark-trace/v1 output base; each invocation creates "
-            "a private trace run"
+            "Override the benchmark-trace/v1 output base "
+            f"(default: {DEFAULT_TRACE_DIR})"
         ),
+    )
+    tracing.add_argument(
+        "--no-trace",
+        action="store_const",
+        const=None,
+        dest="trace_dir",
+        help="Disable benchmark tracing for this run",
     )
     return parser
 
@@ -337,17 +347,15 @@ def build_harbor_command(
         f"commit={options.hermes_commit}",
     ]
     if trace_run is not None:
-        agent_kwargs.extend(
-            (
-                f"trace_root={trace_run.root}",
-                f"trace_run_id={trace_run.id}",
-                f"trace_created_at={trace_run.created_at}",
-                f"trace_benchmark={trace_run.benchmark}",
-                f"evaluation_workers={options.concurrency}",
-                f"benchmark_retries={options.max_retries}",
-                f"harbor_version={harbor_version}",
-            )
-        )
+        agent_kwargs.extend((
+            f"trace_root={trace_run.root}",
+            f"trace_run_id={trace_run.id}",
+            f"trace_created_at={trace_run.created_at}",
+            f"trace_benchmark={trace_run.benchmark}",
+            f"evaluation_workers={options.concurrency}",
+            f"benchmark_retries={options.max_retries}",
+            f"harbor_version={harbor_version}",
+        ))
     command = [
         options.harbor_bin,
         "run",

@@ -77,7 +77,7 @@ hermes-terminalbench \
 # Complete local dataset, one attempt per task, without upload.
 hermes-terminalbench --all-tasks --run-id qwen-next-terminal-full
 
-# Record a normalized research trace for every attempted task.
+# Tracing is automatic; override its repository-local base if needed.
 hermes-terminalbench \
   --run-id traced-terminal-smoke \
   --trace-dir /path/to/traces
@@ -100,12 +100,14 @@ local integration edits are exercised without building a separate agent image.
 The manifest records both the installed remote revision and the invoking
 checkout's full source identity, including dirty-state fingerprinting.
 
-Tracing is disabled unless `--trace-dir` is supplied. A traced run requires the
-exact clean checkout selected by `--hermes-commit` and creates a private
-`trace-run-<uuid>` only after Harbor and Docker preflight. The worker attaches
-the Hermes-native callback adapter to the coordinator without replacing
-`delegate_task`, recording timestamped session, model, tool, shell, file,
-search, native child-delegation, and compaction activity.
+Tracing defaults to the repository-local `.benchmark-traces/` base. Use
+`--trace-dir <base-directory>` to override it or `--no-trace` for an intentional
+untraced run. A traced run requires the exact clean checkout selected by
+`--hermes-commit` and creates a private `trace-run-<uuid>` only after Harbor and
+Docker preflight. The worker attaches the Hermes-native callback adapter to the
+coordinator without replacing `delegate_task`, recording timestamped session,
+model, tool, shell, file, search, native child-delegation, and compaction
+activity.
 
 The trace also records Harbor's resolved task identity, effective agent timeout,
 and container image. Concurrent trials receive locked per-instance attempt

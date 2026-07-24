@@ -27,7 +27,7 @@ def test_safe_defaults_match_peer_terminal_bench_runners():
     assert options.upload is False
     assert options.public is False
     assert options.leaderboard is False
-    assert options.trace_dir is None
+    assert options.trace_dir == benchmark.DEFAULT_TRACE_DIR
     assert worker.COORDINATOR_BUDGET == 24
     assert worker.PEER_PHASE_BUDGETS == {
         "navigator": 10,
@@ -164,6 +164,12 @@ def test_trace_command_passes_nonsecret_trial_metadata(tmp_path: Path):
     assert "benchmark_retries=0" in agent_kwargs
     assert "harbor_version=0.20.0" in agent_kwargs
     assert "API_KEY" not in " ".join(agent_kwargs)
+
+
+def test_tracing_can_be_disabled_explicitly():
+    assert (
+        benchmark.parse_args(["--run-id", "untraced", "--no-trace"]).trace_dir is None
+    )
 
 
 def test_git_remote_is_normalized_for_credential_free_container_install(monkeypatch):

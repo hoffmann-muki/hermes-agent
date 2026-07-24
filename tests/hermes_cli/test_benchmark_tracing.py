@@ -538,9 +538,16 @@ def test_worker_wires_trace_callbacks_without_a_model_call(tmp_path, monkeypatch
     "parser",
     (swebench_verified.build_parser, swebench_pro.build_parser),
 )
-def test_swe_cli_trace_directory_is_explicit_and_inference_only(parser, tmp_path):
+def test_swe_cli_trace_directory_defaults_to_repo_and_is_inference_only(
+    parser, tmp_path
+):
+    defaults = parser().parse_args(["infer"])
+    assert defaults.trace_dir == swebench_verified.DEFAULT_TRACE_DIR
     args = parser().parse_args(["infer", "--trace-dir", str(tmp_path)])
     assert args.trace_dir == tmp_path
+    assert parser().parse_args(["infer", "--no-trace"]).trace_dir is None
+    with pytest.raises(SystemExit):
+        parser().parse_args(["infer", "--trace-dir", str(tmp_path), "--no-trace"])
     with pytest.raises(SystemExit):
         parser().parse_args([
             "evaluate",
