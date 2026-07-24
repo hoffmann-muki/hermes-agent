@@ -1,0 +1,298 @@
+"""Harbor bridge utilities for Hermes benchmark traces."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import tomllib
+from collections.abc import Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterator
+
+from hermes_cli.benchmarks.tracing.runtime import (
+    attempt_directory,
+    write_run_index,
+)
+
+
+_ALLOCATION_FILENAME = ".harbor-attempts.json"
+_LOCK_FILENAME = ".harbor-attempts.lock"
+
+
+@dataclass(frozen=True)
+class HarborTraceAttempt:
+    instance_id: str
+    attempt: int
+    agent_timeout_seconds: float
+    container_image: str
+    container_root: Path
+
+
+def allocate_harbor_trace_attempt(
+    *,
+    logs_dir: Path,
+    trace_root: Path,
+) -> HarborTraceAttempt:
+    """Assign one per-instance ordinal before Harbor starts the agent."""
+
+    instance_id = trace_instance_id_from_trial_config(logs_dir)
+    timeout = trace_agent_timeout_from_trial_config(logs_dir)
+    image = trace_container_image_from_trial_config(logs_dir)
+    root = trace_root.resolve()
+    if not root.is_dir() or trace_root.is_symlink():
+        raise ValueError(f"Harbor trace root must be a real directory: {trace_root}")
+
+    with _allocation_lock(root):
+        allocation_path = root / _ALLOCATION_FILENAME
+        allocations = _read_allocations(allocation_path)
+        attempt = allocations.get(instance_id, 0) + 1
+        allocations[instance_id] = attempt
+        _atomic_write_json(allocation_path, allocations)
+
+    return HarborTraceAttempt(
+        instance_id=instance_id,
+        attempt=attempt,
+        agent_timeout_seconds=timeout,
+        container_image=image,
+        container_root=Path("/logs/agent/benchmark-trace"),
+    )
+
+
+def promote_harbor_trace_attempt(
+    *,
+    logs_dir: Path,
+    trace_root: Path,
+    attempt: HarborTraceAttempt,
+) -> Path:
+    """Promote one sanitized in-container trace into the canonical run."""
+
+    source = attempt_directory(
+        logs_dir / attempt.container_root.name,
+        attempt.instance_id,
+        attempt.attempt,
+    )
+    destination = attempt_directory(
+        trace_root.resolve(),
+        attempt.instance_id,
+        attempt.attempt,
+    )
+    if not source.is_dir() or source.is_symlink():
+        raise ValueError(f"Harbor agent trace is missing: {source}")
+    if any(path.is_symlink() for path in source.rglob("*")):
+        raise ValueError("Harbor agent trace contains a symbolic link")
+    if destination.exists():
+        raise FileExistsError(f"Harbor trace attempt already exists: {destination}")
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    shutil.copytree(source, destination)
+    if os.name != "nt":
+        destination.chmod(0o700)
+    shutil.rmtree(logs_dir / attempt.container_root.name, ignore_errors=True)
+    return destination
+
+
+def finalize_harbor_trace_run(
+    *,
+    trace_root: Path,
+    run_id: str,
+    benchmark: str,
+    created_at: str,
+    selected_instance_ids: Sequence[str] | None,
+    expected_instance_count: int,
+    expected_attempts_per_instance: int,
+    selection_strategy: str,
+) -> Path:
+    """Require complete promoted coverage, then write the shared run index."""
+
+    root = trace_root.resolve()
+    _remove_allocator_files(root)
+    observed: dict[str, set[int]] = {}
+    for path in sorted(root.glob("instances/*/attempt-*/manifest.json")):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            isinstance(value, dict)
+            and value.get("run_id") == run_id
+            and value.get("benchmark") == benchmark
+            and value.get("framework") == "hermes"
+            and isinstance(value.get("instance_id"), str)
+            and isinstance(value.get("attempt"), int)
+        ):
+            observed.setdefault(value["instance_id"], set()).add(value["attempt"])
+
+    instance_ids = (
+        list(selected_instance_ids)
+        if selected_instance_ids is not None
+        else sorted(observed)
+    )
+    if len(instance_ids) != expected_instance_count:
+        raise ValueError(
+            "Trace run index omitted because the observed instance count "
+            f"{len(instance_ids)} does not match {expected_instance_count}"
+        )
+    if set(instance_ids) != set(observed):
+        raise ValueError(
+            "Trace run index omitted because selected instances lack finalized traces"
+        )
+    if any(
+        len(attempts) < expected_attempts_per_instance
+        for attempts in observed.values()
+    ):
+        raise ValueError(
+            "Trace run index omitted because an instance lacks a requested attempt"
+        )
+    return write_run_index(
+        root=root,
+        run_id=run_id,
+        benchmark=benchmark,
+        created_at=created_at,
+        instance_ids=instance_ids,
+        selection_strategy=selection_strategy,
+    )
+
+
+def trace_instance_id_from_trial_config(logs_dir: Path) -> str:
+    config = _trial_config(logs_dir)
+    task = config.get("task")
+    if not isinstance(task, dict):
+        raise ValueError("Harbor trial config has no task object")
+    name = task.get("name")
+    if not isinstance(name, str) or not name:
+        raise ValueError("Harbor trial config has no task name")
+    return name.split("/", 1)[-1]
+
+
+def trace_instance_ids_from_job(jobs_dir: Path, job_name: str) -> list[str]:
+    """Return Harbor's resolved task order with repeated attempts collapsed."""
+
+    value = json.loads(
+        (jobs_dir / job_name / "lock.json").read_text(encoding="utf-8")
+    )
+    trials = value.get("trials") if isinstance(value, dict) else None
+    if not isinstance(trials, list):
+        raise ValueError("Harbor job lock has no resolved trials")
+
+    instance_ids: list[str] = []
+    for trial in trials:
+        task = trial.get("task") if isinstance(trial, dict) else None
+        name = task.get("name") if isinstance(task, dict) else None
+        if not isinstance(name, str) or not name:
+            raise ValueError("Harbor job lock has a trial without a task name")
+        instance_id = name.split("/", 1)[-1]
+        if instance_id not in instance_ids:
+            instance_ids.append(instance_id)
+    if not instance_ids:
+        raise ValueError("Harbor job lock selected no tasks")
+    return instance_ids
+
+
+def trace_agent_timeout_from_trial_config(logs_dir: Path) -> float:
+    config = _trial_config(logs_dir)
+    task = config.get("task")
+    agent = config.get("agent")
+    if not isinstance(task, dict):
+        raise ValueError("Harbor trial config has no task object")
+    override = agent.get("override_timeout_sec") if isinstance(agent, dict) else None
+    if isinstance(override, int | float) and override > 0:
+        timeout = float(override)
+    else:
+        with (_resolved_task_path(task) / "task.toml").open("rb") as file:
+            task_document = tomllib.load(file)
+        task_agent = task_document.get("agent")
+        timeout_value = (
+            task_agent.get("timeout_sec") if isinstance(task_agent, dict) else None
+        )
+        if not isinstance(timeout_value, int | float) or timeout_value <= 0:
+            raise ValueError("Harbor task has no positive agent timeout")
+        timeout = float(timeout_value)
+    multiplier = config.get("agent_timeout_multiplier")
+    if multiplier is None:
+        multiplier = config.get("timeout_multiplier", 1)
+    if not isinstance(multiplier, int | float) or multiplier <= 0:
+        raise ValueError("Harbor trial timeout multiplier must be positive")
+    return timeout * float(multiplier)
+
+
+def trace_container_image_from_trial_config(logs_dir: Path) -> str:
+    config = _trial_config(logs_dir)
+    task = config.get("task")
+    if not isinstance(task, dict):
+        raise ValueError("Harbor trial config has no task object")
+    with (_resolved_task_path(task) / "task.toml").open("rb") as file:
+        task_document = tomllib.load(file)
+    environment = task_document.get("environment")
+    image = (
+        environment.get("docker_image") if isinstance(environment, dict) else None
+    )
+    if not isinstance(image, str) or not image:
+        raise ValueError("Harbor task has no Docker image")
+    return image
+
+
+def _trial_config(logs_dir: Path) -> dict[str, Any]:
+    value = json.loads((logs_dir.parent / "config.json").read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("Harbor trial config must be an object")
+    return value
+
+
+def _resolved_task_path(task: dict[str, Any]) -> Path:
+    name = task.get("name")
+    reference = task.get("ref")
+    if (
+        not isinstance(name, str)
+        or "/" not in name
+        or not isinstance(reference, str)
+        or not reference.startswith("sha256:")
+    ):
+        raise ValueError("Harbor package task is not pinned to a digest")
+    # Harbor is installed by the benchmark environment, not Hermes core.
+    from harbor.models.task.id import PackageTaskId
+
+    organization, task_name = name.split("/", 1)
+    return PackageTaskId(
+        org=organization,
+        name=task_name,
+        ref=reference,
+    ).get_local_path()
+
+
+@contextmanager
+def _allocation_lock(root: Path) -> Iterator[None]:
+    import fcntl
+
+    with (root / _LOCK_FILENAME).open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _read_allocations(path: Path) -> dict[str, int]:
+    if not path.exists():
+        return {}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str) and isinstance(item, int) and item >= 0
+        for key, item in value.items()
+    ):
+        raise ValueError("Harbor trace attempt allocation state is invalid")
+    return value
+
+
+def _atomic_write_json(path: Path, value: dict[str, int]) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(value, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if os.name != "nt":
+        temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def _remove_allocator_files(root: Path) -> None:
+    for name in (_ALLOCATION_FILENAME, _LOCK_FILENAME):
+        (root / name).unlink(missing_ok=True)

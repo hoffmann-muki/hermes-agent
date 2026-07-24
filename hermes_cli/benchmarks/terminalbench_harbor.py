@@ -15,6 +15,12 @@ from harbor.agents.installed.hermes import Hermes
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from hermes_cli.benchmarks.tracing.harbor import (
+    HarborTraceAttempt,
+    allocate_harbor_trace_attempt,
+    promote_harbor_trace_attempt,
+)
+
 
 class BenchmarkHermes(Hermes):
     """Install Hermes, then run its isolated benchmark coordinator."""
@@ -25,6 +31,12 @@ class BenchmarkHermes(Hermes):
         prompt_template_path: Path | str | None = None,
         repository: str = "https://github.com/NousResearch/hermes-agent.git",
         commit: str | None = None,
+        trace_root: str | None = None,
+        trace_run_id: str | None = None,
+        trace_created_at: str | None = None,
+        evaluation_workers: int = 1,
+        benchmark_retries: int = 0,
+        harbor_version: str = "unknown",
         *args,
         **kwargs,
     ) -> None:
@@ -43,6 +55,22 @@ class BenchmarkHermes(Hermes):
             raise ValueError("commit must be a full 40-character Git commit")
         self._repository = repository
         self._commit = commit
+        trace_values = (trace_root, trace_run_id, trace_created_at)
+        if any(value is not None for value in trace_values) and not all(
+            value is not None for value in trace_values
+        ):
+            raise ValueError("Hermes Harbor tracing requires complete metadata")
+        if trace_root is not None and commit is None:
+            raise ValueError("Hermes Harbor tracing requires an exact commit")
+        if evaluation_workers < 1 or benchmark_retries < 0:
+            raise ValueError("Hermes Harbor trace execution metadata is invalid")
+        self._trace_root = Path(trace_root).resolve() if trace_root else None
+        self._trace_run_id = trace_run_id
+        self._trace_created_at = trace_created_at
+        self._evaluation_workers = evaluation_workers
+        self._benchmark_retries = benchmark_retries
+        self._harbor_version = harbor_version
+        self._trace_attempt: HarborTraceAttempt | None = None
         if prompt_template_path is None:
             logs_dir.mkdir(parents=True, exist_ok=True)
             prompt_template_path = logs_dir / "multiagent-prompt.j2"
@@ -56,6 +84,11 @@ class BenchmarkHermes(Hermes):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
+        if self._trace_root is not None:
+            self._trace_attempt = allocate_harbor_trace_attempt(
+                logs_dir=self.logs_dir,
+                trace_root=self._trace_root,
+            )
         if not self._version:
             raise ValueError("A Hermes branch or tag is required")
         await self.exec_as_root(
@@ -120,6 +153,30 @@ class BenchmarkHermes(Hermes):
             "HERMES_HOME": "/tmp/hermes",
             "OPENROUTER_API_KEY": api_key,
         }
+        if self._trace_attempt is not None:
+            if self.session_id is None or self._commit is None:
+                raise ValueError("Harbor did not initialize Hermes trace identity")
+            env["HERMES_BENCHMARK_TRACE_CONFIG"] = json.dumps(
+                {
+                    "runId": self._trace_run_id,
+                    "benchmark": "terminal-bench-2.1",
+                    "instanceId": self._trace_attempt.instance_id,
+                    "attempt": self._trace_attempt.attempt,
+                    "runRoot": str(self._trace_attempt.container_root),
+                    "createdAt": self._trace_created_at,
+                    "frameworkRevision": self._commit.lower(),
+                    "model": self.model_name,
+                    "evaluationWorkers": self._evaluation_workers,
+                    "agentTimeoutSeconds": (
+                        self._trace_attempt.agent_timeout_seconds
+                    ),
+                    "benchmarkRetries": self._benchmark_retries,
+                    "harborVersion": self._harbor_version,
+                    "sessionId": self.session_id,
+                    "containerImage": self._trace_attempt.container_image,
+                },
+                separators=(",", ":"),
+            )
         command = """set -e
 export PATH="$HOME/.local/bin:$PATH"
 HERMES_LAUNCHER="$(command -v hermes)"
@@ -142,6 +199,25 @@ fi
     @override
     def populate_context_post_run(self, context: AgentContext) -> None:
         super().populate_context_post_run(context)
+        if self._trace_attempt is not None and self._trace_root is not None:
+            metadata = {**(context.metadata or {})}
+            try:
+                destination = promote_harbor_trace_attempt(
+                    logs_dir=self.logs_dir,
+                    trace_root=self._trace_root,
+                    attempt=self._trace_attempt,
+                )
+                metadata["benchmark_trace"] = {
+                    "path": str(destination),
+                    "instance_id": self._trace_attempt.instance_id,
+                    "attempt": self._trace_attempt.attempt,
+                }
+            except Exception as error:
+                metadata["benchmark_trace"] = {
+                    "health": "failed",
+                    "error": type(error).__name__,
+                }
+            context.metadata = metadata
         result_path = self.logs_dir / "hermes-result.json"
         if not result_path.exists():
             return

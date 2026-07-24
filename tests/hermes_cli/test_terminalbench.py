@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from hermes_cli.benchmarks import terminalbench as benchmark
 from hermes_cli.benchmarks import terminalbench_worker as worker
+from hermes_cli.benchmarks.tracing import HermesTraceRun
 
 
 def test_safe_defaults_match_peer_terminal_bench_runners():
@@ -25,6 +27,7 @@ def test_safe_defaults_match_peer_terminal_bench_runners():
     assert options.upload is False
     assert options.public is False
     assert options.leaderboard is False
+    assert options.trace_dir is None
     assert worker.COORDINATOR_BUDGET == 24
     assert worker.PEER_PHASE_BUDGETS == {
         "navigator": 10,
@@ -131,6 +134,41 @@ def test_harbor_command_is_reproducible_and_credential_free(tmp_path: Path):
     assert command[command.index("--include-task-name") + 1] == "task-a"
     assert command[command.index("--n-tasks") + 1] == "1"
     assert "OPENROUTER_API_KEY" not in rendered
+
+
+def test_trace_command_passes_nonsecret_trial_metadata(tmp_path: Path):
+    options = benchmark.parse_args([
+        "--run-id",
+        "traced",
+        "--trace-dir",
+        str(tmp_path / "traces"),
+    ])
+    trace_run = HermesTraceRun(
+        id="trace-run-test",
+        root=tmp_path / "traces" / "trace-run-test",
+        created_at="2026-07-20T12:34:56+00:00",
+        benchmark="terminal-bench-2.1",
+    )
+
+    command = benchmark.build_harbor_command(
+        options,
+        tmp_path / "jobs",
+        trace_run=trace_run,
+        harbor_version="0.20.0",
+    )
+    agent_kwargs = [
+        command[index + 1]
+        for index, value in enumerate(command)
+        if value == "--agent-kwarg"
+    ]
+
+    assert options.trace_dir == tmp_path / "traces"
+    assert f"trace_root={trace_run.root}" in agent_kwargs
+    assert "trace_run_id=trace-run-test" in agent_kwargs
+    assert "evaluation_workers=1" in agent_kwargs
+    assert "benchmark_retries=0" in agent_kwargs
+    assert "harbor_version=0.20.0" in agent_kwargs
+    assert "API_KEY" not in " ".join(agent_kwargs)
 
 
 def test_git_remote_is_normalized_for_credential_free_container_install(monkeypatch):
@@ -276,3 +314,62 @@ def test_worker_session_artifact_redacts_provider_credentials(
     assert "private-value" not in content
     assert "[REDACTED]" in content
     assert session_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_trace_completion_is_independent_of_delegation_audit(
+    tmp_path: Path,
+    monkeypatch,
+):
+    statuses = []
+
+    class Trace:
+        def callbacks(self):
+            return {}
+
+        def container_observed(self, _metadata):
+            return None
+
+        def start_session(self, _session_id):
+            return None
+
+        def finish(self, status, **_kwargs):
+            statuses.append(status)
+            return SimpleNamespace(
+                trace_id="trace-test",
+                attempt_dir=str(tmp_path / "attempt"),
+                health="healthy",
+                complete=True,
+            )
+
+    class Agent:
+        def run_conversation(self, *_args, **_kwargs):
+            return {
+                "completed": True,
+                "interrupted": False,
+                "messages": [],
+            }
+
+        def release_clients(self):
+            return None
+
+    monkeypatch.setattr(worker, "create_trace_adapter", Trace)
+    monkeypatch.setattr(worker, "_configure_runtime", lambda _workdir: None)
+    monkeypatch.setattr(worker, "SESSION_PATH", tmp_path / "session.jsonl")
+    monkeypatch.setenv(
+        "HERMES_BENCHMARK_TRACE_CONFIG",
+        json.dumps({
+            "sessionId": "session-test",
+            "containerImage": "example/task:latest",
+        }),
+    )
+
+    result = worker.run_worker(
+        "Complete the task.",
+        api_key="test-only-key",
+        model="qwen/qwen3-coder-next",
+        workdir=tmp_path,
+        agent_factory=lambda **_kwargs: Agent(),
+    )
+
+    assert result["workflowComplete"] is False
+    assert statuses == ["completed"]

@@ -23,6 +23,14 @@ from hermes_cli.benchmarks.swebench_verified import (
     hermes_source_identity,
     utc_now,
 )
+from hermes_cli.benchmarks.tracing import (
+    HermesTraceRun,
+    create_hermes_trace_run,
+)
+from hermes_cli.benchmarks.tracing.harbor import (
+    finalize_harbor_trace_run,
+    trace_instance_ids_from_job,
+)
 
 
 BENCHMARK = "terminal-bench-2.1"
@@ -72,6 +80,7 @@ class Options:
     public: bool
     leaderboard: bool
     dry_run: bool
+    trace_dir: Path | None
 
 
 @dataclass(frozen=True)
@@ -220,6 +229,14 @@ Examples:
         help="Run all 89 tasks with at least five attempts and public upload",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--trace-dir",
+        type=Path,
+        help=(
+            "Opt-in benchmark-trace/v1 output base; each invocation creates "
+            "a private trace run"
+        ),
+    )
     return parser
 
 
@@ -289,6 +306,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         public=public,
         leaderboard=args.leaderboard,
         dry_run=args.dry_run,
+        trace_dir=args.trace_dir,
     )
 
 
@@ -306,7 +324,29 @@ def build_paths(options: Options) -> RunPaths:
     )
 
 
-def build_harbor_command(options: Options, jobs_dir: Path) -> list[str]:
+def build_harbor_command(
+    options: Options,
+    jobs_dir: Path,
+    *,
+    trace_run: HermesTraceRun | None = None,
+    harbor_version: str = "unknown",
+) -> list[str]:
+    agent_kwargs = [
+        f"version={options.hermes_version}",
+        f"repository={options.hermes_repository}",
+        f"commit={options.hermes_commit}",
+    ]
+    if trace_run is not None:
+        agent_kwargs.extend(
+            (
+                f"trace_root={trace_run.root}",
+                f"trace_run_id={trace_run.id}",
+                f"trace_created_at={trace_run.created_at}",
+                f"evaluation_workers={options.concurrency}",
+                f"benchmark_retries={options.max_retries}",
+                f"harbor_version={harbor_version}",
+            )
+        )
     command = [
         options.harbor_bin,
         "run",
@@ -316,12 +356,11 @@ def build_harbor_command(options: Options, jobs_dir: Path) -> list[str]:
         AGENT_IMPORT_PATH,
         "--model",
         options.model,
-        "--agent-kwarg",
-        f"version={options.hermes_version}",
-        "--agent-kwarg",
-        f"repository={options.hermes_repository}",
-        "--agent-kwarg",
-        f"commit={options.hermes_commit}",
+        *[
+            value
+            for agent_kwarg in agent_kwargs
+            for value in ("--agent-kwarg", agent_kwarg)
+        ],
         "--env",
         options.environment,
         "--n-attempts",
@@ -465,7 +504,11 @@ def run_streaming(command: Sequence[str], paths: RunPaths) -> int:
 
 
 def manifest(
-    options: Options, paths: RunPaths, command: Sequence[str]
+    options: Options,
+    paths: RunPaths,
+    command: Sequence[str],
+    *,
+    trace_run: HermesTraceRun | None = None,
 ) -> dict[str, Any]:
     return {
         "schemaVersion": 1,
@@ -502,6 +545,7 @@ def manifest(
         "jobsDir": str(paths.jobs_dir),
         "stdoutPath": str(paths.stdout),
         "stderrPath": str(paths.stderr),
+        **({"traceDir": str(trace_run.root)} if trace_run is not None else {}),
     }
 
 
@@ -513,29 +557,96 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(command))
         return 0
 
+    source_identity = hermes_source_identity()
+    if options.trace_dir is not None and (
+        source_identity.get("dirty") is not False
+        or source_identity.get("commit") != options.hermes_commit
+    ):
+        print(
+            "Preflight failed: tracing requires the exact clean Hermes checkout "
+            "selected by --hermes-commit",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         harbor_version = preflight(options)
     except BenchmarkError as exc:
         print(f"Preflight failed: {exc}", file=sys.stderr)
         return 1
 
+    trace_run = (
+        create_hermes_trace_run(options.trace_dir, BENCHMARK)
+        if options.trace_dir is not None
+        else None
+    )
+    command = build_harbor_command(
+        options,
+        paths.jobs_dir,
+        trace_run=trace_run,
+        harbor_version=harbor_version,
+    )
     paths.jobs_dir.mkdir(parents=True, exist_ok=True)
     run_manifest = {
-        **manifest(options, paths, command),
+        **manifest(options, paths, command, trace_run=trace_run),
         "harborVersion": harbor_version,
         "startedAt": utc_now(),
         "status": "running",
     }
     atomic_write_json(paths.manifest, run_manifest)
+
+    def finalize_trace() -> None:
+        if trace_run is None:
+            return
+        expected_count = (
+            len(options.task_names)
+            if options.task_names
+            else options.max_tasks
+            if options.max_tasks is not None
+            else OFFICIAL_TASK_COUNT
+        )
+        try:
+            finalize_harbor_trace_run(
+                trace_root=trace_run.root,
+                run_id=trace_run.id,
+                benchmark=trace_run.benchmark,
+                created_at=trace_run.created_at,
+                selected_instance_ids=(
+                    options.task_names
+                    if options.task_names
+                    else trace_instance_ids_from_job(
+                        paths.jobs_dir,
+                        options.run_id,
+                    )
+                ),
+                expected_instance_count=expected_count,
+                expected_attempts_per_instance=options.attempts,
+                selection_strategy=(
+                    "explicit_ids"
+                    if options.task_names
+                    else "ordered_window"
+                    if options.max_tasks is not None
+                    else "full_dataset"
+                ),
+            )
+        except Exception as exc:
+            print(
+                "[trace] Hermes trace run index could not be finalized; "
+                f"benchmark outputs remain valid: {type(exc).__name__}",
+                file=sys.stderr,
+            )
+
     try:
         exit_code = run_streaming(command, paths)
     except BaseException:
+        finalize_trace()
         atomic_write_json(
             paths.manifest,
             {**run_manifest, "finishedAt": utc_now(), "status": "failed"},
         )
         raise
 
+    finalize_trace()
     atomic_write_json(
         paths.manifest,
         {
@@ -547,6 +658,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(f"Harbor artifacts: {paths.jobs_dir}")
     print(f"Run manifest: {paths.manifest}")
+    if trace_run is not None:
+        print(f"Benchmark traces: {trace_run.root}")
     return exit_code
 
 

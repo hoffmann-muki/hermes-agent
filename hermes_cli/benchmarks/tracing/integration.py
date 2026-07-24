@@ -67,8 +67,11 @@ def create_hermes_attempt_trace(
     attempt: int,
     framework_revision: str,
     model: str,
-    agent_timeout_seconds: int,
+    agent_timeout_seconds: int | float,
     evaluation_workers: int,
+    benchmark_retries: int = 0,
+    harness_revision: str | None = None,
+    agent_image: str | None = None,
 ) -> HermesTraceAdapter:
     if not re.fullmatch(r"[0-9a-f]{40}", framework_revision):
         raise ValueError("Tracing requires an exact 40-character Hermes revision")
@@ -100,12 +103,23 @@ def create_hermes_attempt_trace(
                     "name": "hermes_cli.benchmarks.tracing.hermes",
                     "revision": framework_revision,
                 },
+                **(
+                    {
+                        "harness": {
+                            "name": "Harbor",
+                            "revision": harness_revision,
+                        }
+                    }
+                    if harness_revision
+                    else {}
+                ),
+                **({"agent_image": agent_image} if agent_image else {}),
             },
             execution={
                 "model": model,
                 "evaluation_workers": evaluation_workers,
                 "inference_timeout_seconds": agent_timeout_seconds,
-                "benchmark_retries": 0,
+                "benchmark_retries": benchmark_retries,
                 "provider_attempts": 1,
             },
             capabilities=hermes_capabilities({}),

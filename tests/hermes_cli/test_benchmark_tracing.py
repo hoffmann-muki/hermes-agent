@@ -10,16 +10,123 @@ import pytest
 from hermes_cli.benchmarks import swebench_pro, swebench_verified
 from hermes_cli.benchmarks import swebench_verified_worker as worker
 from hermes_cli.benchmarks.tracing import (
+    HermesTraceRun,
     create_hermes_attempt_trace,
     create_hermes_trace_run,
     finalize_hermes_trace_run,
 )
 from hermes_cli.benchmarks import tracing as tracing_package
+from hermes_cli.benchmarks.tracing.harbor import (
+    allocate_harbor_trace_attempt,
+    finalize_harbor_trace_run,
+    promote_harbor_trace_attempt,
+    trace_instance_ids_from_job,
+)
 
 
 INSTANCE = "owner__repo-1"
 REVISION = "a" * 40
 MODEL = "openrouter/qwen/qwen3-coder-next"
+
+
+def test_harbor_job_lock_preserves_resolved_task_order(tmp_path):
+    job = tmp_path / "jobs" / "run"
+    job.mkdir(parents=True)
+    (job / "lock.json").write_text(
+        json.dumps(
+            {
+                "trials": [
+                    {"task": {"name": "terminal-bench/task-b"}},
+                    {"task": {"name": "terminal-bench/task-a"}},
+                    {"task": {"name": "terminal-bench/task-b"}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert trace_instance_ids_from_job(tmp_path / "jobs", "run") == [
+        "task-b",
+        "task-a",
+    ]
+
+
+def test_harbor_bridge_preserves_multiple_native_attempts(tmp_path, monkeypatch):
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "task.toml").write_text(
+        "[agent]\ntimeout_sec = 900\n\n"
+        "[environment]\ndocker_image = \"example/task:latest\"\n",
+        encoding="utf-8",
+    )
+    logs_dir = tmp_path / "job" / "trial" / "agent"
+    logs_dir.mkdir(parents=True)
+    (logs_dir.parent / "config.json").write_text(
+        json.dumps(
+            {
+                "task": {
+                    "name": "terminal-bench/task-a",
+                    "ref": "sha256:" + "a" * 64,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "hermes_cli.benchmarks.tracing.harbor._resolved_task_path",
+        lambda _task: task_dir,
+    )
+    run = create_hermes_trace_run(
+        tmp_path / "traces",
+        "terminal-bench-2.1",
+    )
+
+    for expected_attempt in (1, 2):
+        allocation = allocate_harbor_trace_attempt(
+            logs_dir=logs_dir,
+            trace_root=run.root,
+        )
+        inner_run = HermesTraceRun(
+            id=run.id,
+            root=logs_dir / allocation.container_root.name,
+            created_at=run.created_at,
+            benchmark=run.benchmark,
+        )
+        adapter = create_hermes_attempt_trace(
+            run=inner_run,
+            instance_id=allocation.instance_id,
+            attempt=allocation.attempt,
+            framework_revision=REVISION,
+            model=MODEL,
+            agent_timeout_seconds=allocation.agent_timeout_seconds,
+            evaluation_workers=1,
+            agent_image=allocation.container_image,
+        )
+        adapter.container_observed({"image": allocation.container_image})
+        adapter.start_session(f"task-a-attempt-{expected_attempt}")
+        adapter.finish("completed", messages=[])
+        promoted = promote_harbor_trace_attempt(
+            logs_dir=logs_dir,
+            trace_root=run.root,
+            attempt=allocation,
+        )
+
+        assert allocation.attempt == expected_attempt
+        assert promoted.name == f"attempt-{expected_attempt}"
+
+    run_index = finalize_harbor_trace_run(
+        trace_root=run.root,
+        run_id=run.id,
+        benchmark=run.benchmark,
+        created_at=run.created_at,
+        selected_instance_ids=["task-a"],
+        expected_instance_count=1,
+        expected_attempts_per_instance=2,
+        selection_strategy="explicit_ids",
+    )
+    attempts = json.loads(run_index.read_text(encoding="utf-8"))["attempts"]
+
+    assert [attempt["attempt"] for attempt in attempts] == [1, 2]
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -62,6 +169,10 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
                 "arguments": {"command": "pwd"},
                 "result": "/testbed",
                 "usage": {"total_tokens": 99},
+                "metrics": {
+                    "tokens": {"input": 10, "output": 5},
+                    "duration_ms": 25,
+                },
             }
         ],
     )
@@ -193,6 +304,8 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
     assert "must-not-persist" not in retained
     assert '"usage"' not in retained
     assert '"total_tokens"' not in retained
+    assert '"tokens"' not in retained
+    assert '"duration_ms":25' in retained
     assert '"cost_usd"' not in retained
     assert (run.root / "run.json").stat().st_mode & 0o777 == 0o600
 

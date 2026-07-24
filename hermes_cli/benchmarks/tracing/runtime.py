@@ -179,6 +179,7 @@ _ACCOUNTING_FIELDS = {
     "prompttokens",
     "reasoningtokens",
     "tokencount",
+    "tokens",
     "totalcost",
     "totalcostusd",
     "totaltokens",
@@ -884,34 +885,61 @@ def write_run_index(
 ) -> Path:
     attempts = []
     for instance_id in instance_ids:
-        relative = (
-            f"instances/{encode_instance_id(instance_id)}/attempt-1"
-        )
-        manifest_path = root / relative / "manifest.json"
-        events_path = root / relative / "events.jsonl"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        events = [
-            json.loads(line)
-            for line in events_path.read_text(encoding="utf-8").splitlines()
-            if line
-        ]
-        status = next(
+        instance_root = root / "instances" / encode_instance_id(instance_id)
+        attempt_dirs = sorted(
             (
-                event["status"]
-                for event in reversed(events)
-                if event.get("event_type") == "instance.end"
+                path
+                for path in instance_root.glob("attempt-*")
+                if path.is_dir()
+                and path.name.removeprefix("attempt-").isdigit()
             ),
-            "degraded",
+            key=lambda path: int(path.name.removeprefix("attempt-")),
         )
-        attempts.append(
-            {
-                "trace_id": manifest["trace_id"],
-                "instance_id": instance_id,
-                "attempt": 1,
-                "path": relative,
-                "status": status,
-            }
-        )
+        for attempt_dir in attempt_dirs:
+            manifest = json.loads(
+                (attempt_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            if (
+                not isinstance(manifest, dict)
+                or manifest.get("run_id") != run_id
+                or manifest.get("benchmark") != benchmark
+                or manifest.get("framework") != "hermes"
+                or manifest.get("instance_id") != instance_id
+                or manifest.get("attempt")
+                != int(attempt_dir.name.removeprefix("attempt-"))
+            ):
+                raise TraceStorageError(
+                    f"Trace attempt identity does not match its run: {attempt_dir}"
+                )
+            events = [
+                json.loads(line)
+                for line in (attempt_dir / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line
+            ]
+            status = next(
+                (
+                    event["status"]
+                    for event in reversed(events)
+                    if event.get("event_type") == "attempt.end"
+                ),
+                "degraded",
+            )
+            health = json.loads(
+                (attempt_dir / "health.json").read_text(encoding="utf-8")
+            )
+            if not isinstance(health, dict) or health.get("status") != "healthy":
+                status = "degraded"
+            attempts.append(
+                {
+                    "trace_id": manifest["trace_id"],
+                    "instance_id": instance_id,
+                    "attempt": manifest["attempt"],
+                    "path": attempt_dir.relative_to(root).as_posix(),
+                    "status": status,
+                }
+            )
     document = {
         "schema_version": SCHEMA_VERSION,
         "contract": {

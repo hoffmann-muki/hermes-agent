@@ -9,7 +9,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import yaml
 
@@ -177,6 +177,7 @@ def default_agent_factory(
     model: str,
     task_id: str,
     parent_session_id: str | None = None,
+    callbacks: Mapping[str, Callable[..., Any]] | None = None,
 ) -> Any:
     from hermes_constants import OPENROUTER_BASE_URL
     from run_agent import AIAgent
@@ -200,6 +201,53 @@ def default_agent_factory(
         session_id=f"{task_id}-{role}-{uuid.uuid4().hex[:8]}",
         parent_session_id=parent_session_id or "",
         checkpoints_enabled=False,
+        **dict(callbacks or {}),
+    )
+
+
+def create_trace_adapter() -> Any | None:
+    raw = os.environ.get("HERMES_BENCHMARK_TRACE_CONFIG")
+    if not raw:
+        return None
+    value = json.loads(raw)
+    required = {
+        "runId",
+        "benchmark",
+        "instanceId",
+        "attempt",
+        "runRoot",
+        "createdAt",
+        "frameworkRevision",
+        "model",
+        "evaluationWorkers",
+        "agentTimeoutSeconds",
+        "benchmarkRetries",
+        "sessionId",
+        "containerImage",
+    }
+    if not isinstance(value, dict) or not required.issubset(value):
+        raise ValueError("Hermes Harbor trace configuration is invalid")
+    from hermes_cli.benchmarks.tracing import (
+        HermesTraceRun,
+        create_hermes_attempt_trace,
+    )
+
+    return create_hermes_attempt_trace(
+        run=HermesTraceRun(
+            id=value["runId"],
+            root=Path(value["runRoot"]).resolve(),
+            created_at=value["createdAt"],
+            benchmark=value["benchmark"],
+        ),
+        instance_id=value["instanceId"],
+        attempt=int(value["attempt"]),
+        framework_revision=value["frameworkRevision"],
+        model=value["model"],
+        agent_timeout_seconds=float(value["agentTimeoutSeconds"]),
+        evaluation_workers=int(value["evaluationWorkers"]),
+        benchmark_retries=int(value["benchmarkRetries"]),
+        harness_revision=value.get("harborVersion"),
+        agent_image=value["containerImage"],
     )
 
 
@@ -226,6 +274,7 @@ def run_worker(
     workdir: Path,
     agent_factory: Callable[..., Any] = default_agent_factory,
 ) -> dict[str, Any]:
+    trace_adapter = create_trace_adapter()
     _configure_runtime(workdir)
     from gateway.session_context import declare_stateless_channel
 
@@ -236,13 +285,28 @@ def run_worker(
     error = None
     started = time.monotonic()
     try:
+        agent_options: dict[str, Any] = {
+            "role": "coordinator",
+            "budget": COORDINATOR_BUDGET,
+            "api_key": api_key,
+            "model": model,
+            "task_id": task_id,
+        }
+        if trace_adapter is not None:
+            agent_options["callbacks"] = trace_adapter.callbacks()
         coordinator = agent_factory(
-            role="coordinator",
-            budget=COORDINATOR_BUDGET,
-            api_key=api_key,
-            model=model,
-            task_id=task_id,
+            **agent_options,
         )
+        if trace_adapter is not None:
+            config = json.loads(os.environ["HERMES_BENCHMARK_TRACE_CONFIG"])
+            trace_adapter.container_observed(
+                {
+                    "session_id": config["sessionId"],
+                    "image": config["containerImage"],
+                    "phase": "harbor.agent",
+                }
+            )
+            trace_adapter.start_session(config["sessionId"])
         coordinator_result = coordinator.run_conversation(
             instruction,
             system_message=COORDINATOR_SYSTEM_PROMPT,
@@ -266,6 +330,37 @@ def run_worker(
         and not error
     )
     _write_session([coordinator_result], api_key)
+    trace_result = None
+    if trace_adapter is not None:
+        # Trace lifecycle reports execution completion; delegation parity remains
+        # a separate audit result and is not benchmark success.
+        trace_status = (
+            "completed"
+            if coordinator_result.get("completed")
+            and not coordinator_result.get("interrupted")
+            and error is None
+            else "failed"
+        )
+        try:
+            finalized = trace_adapter.finish(
+                trace_status,
+                messages=coordinator_result.get("messages"),
+                error_message=error,
+            )
+            trace_result = {
+                "traceId": finalized.trace_id,
+                "traceDirectory": finalized.attempt_dir,
+                "traceHealth": finalized.health,
+                "traceComplete": finalized.complete,
+            }
+        except Exception as trace_error:
+            trace_result = {
+                "traceId": trace_adapter.identity.trace_id,
+                "traceDirectory": str(trace_adapter.attempt_dir),
+                "traceHealth": "failed",
+                "traceComplete": False,
+                "error": type(trace_error).__name__,
+            }
     result = {
         "schemaVersion": 1,
         "benchmark": BENCHMARK,
@@ -296,6 +391,7 @@ def run_worker(
         "usage": _merge_usage([coordinator_result]),
         "error": error,
         "durationSeconds": round(time.monotonic() - started, 3),
+        "trace": trace_result,
     }
     return _redact(result, api_key)
 
