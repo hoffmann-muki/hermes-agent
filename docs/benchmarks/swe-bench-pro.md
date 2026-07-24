@@ -86,6 +86,36 @@ order, reject duplicates, and take precedence over the window size. `--dry-run`
 resolves the public rows, image tags, budgets, and output paths without Docker
 or an API call.
 
+### Opt-in research tracing
+
+Add `--trace-dir <base-directory>` to emit the shared
+`benchmark-trace/v1` format used by the OpenCode and OpenHands integrations:
+
+```bash
+hermes-swebench-pro infer \
+  --run-id qwen-next-pro-smoke \
+  --trace-dir .benchmark-runs/traces
+```
+
+Each invocation creates a private `trace-run-<uuid>` directory. Tracing is
+disabled when the flag is absent, is inference-only, requires a clean exact
+Hermes Git revision, and refuses to resume a run that already has completed
+instances. Initialization failure stops before coordinator construction. After
+agent work starts, a trace write or finalization failure cannot change the
+benchmark outcome or trigger a retry.
+
+The adapter uses Hermes' native agent callbacks. It retains sanitized native
+evidence and records root model-turn boundaries, complete root tool arguments
+and results, native tool durations, shell/file/search actions, native
+delegation lifecycle and child text/tool-start signals, and completed context
+compaction facts. Hermes forwards only a bounded child output-tail summary,
+rather than complete child tool results, and does not expose complete child
+model exchanges or a compaction start time through these callbacks. Those limits
+are explicit in `capabilities.json`. Memory and browser tools are disabled by
+this benchmark. Provider bodies, credentials, token usage, and cost accounting
+are not retained. Controller-owned final patch capture and container teardown
+remain outside the worker adapter boundary.
+
 Inference receives only the public fields `repo`, `instance_id`, `base_commit`,
 `problem_statement`, `requirements`, `interface`, `repo_language`, and
 `dockerhub_tag`. Hidden tests, gold patches, and evaluator-only fields are not

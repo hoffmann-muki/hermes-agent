@@ -15,7 +15,7 @@ import signal
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import yaml
 
@@ -341,6 +341,7 @@ def default_agent_factory(
     api_key: str,
     request: dict[str, Any],
     parent_session_id: str | None = None,
+    callbacks: Mapping[str, Callable[..., Any]] | None = None,
 ) -> Any:
     from hermes_constants import OPENROUTER_BASE_URL
     from run_agent import AIAgent
@@ -365,6 +366,41 @@ def default_agent_factory(
         session_id=f"{request['taskId']}-{role}",
         parent_session_id=parent_session_id or "",
         checkpoints_enabled=False,
+        **dict(callbacks or {}),
+    )
+
+
+def create_trace_adapter(request: dict[str, Any]) -> Any | None:
+    value = request.get("trace")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or value.get("benchmark") != WORKER_BENCHMARK
+        or not isinstance(value.get("runId"), str)
+        or not isinstance(value.get("runRoot"), str)
+        or not isinstance(value.get("createdAt"), str)
+        or not isinstance(value.get("frameworkRevision"), str)
+    ):
+        raise BenchmarkError("Worker trace request has an invalid schema")
+    from hermes_cli.benchmarks.tracing import (
+        HermesTraceRun,
+        create_hermes_attempt_trace,
+    )
+
+    return create_hermes_attempt_trace(
+        run=HermesTraceRun(
+            id=value["runId"],
+            root=Path(value["runRoot"]).resolve(),
+            created_at=value["createdAt"],
+            benchmark=value["benchmark"],
+        ),
+        instance_id=request["row"]["instance_id"],
+        attempt=int(request["attempt"]),
+        framework_revision=value["frameworkRevision"],
+        model=request["model"],
+        agent_timeout_seconds=int(request["agentTimeoutSeconds"]),
+        evaluation_workers=1,
     )
 
 
@@ -423,6 +459,7 @@ def run_worker(
     if not api_key:
         raise BenchmarkError("OPENROUTER_API_KEY is required in the worker environment")
 
+    trace_adapter = create_trace_adapter(request)
     configure_worker(request)
     from tools.terminal_tool import clear_task_env_overrides
     from gateway.session_context import declare_stateless_channel
@@ -446,18 +483,34 @@ def run_worker(
         env = setup_environment(request)
         runtime_metadata = _runtime_metadata(request, env)
         atomic_write_json(Path(request["runtimePath"]), runtime_metadata)
+        if trace_adapter is not None:
+            trace_adapter.container_observed(
+                {
+                    "container_id": runtime_metadata["containerId"],
+                    "image": request["image"],
+                    "docker_platform": request["dockerPlatform"],
+                    "worktree": WORKTREE,
+                }
+            )
         if termination_requested.is_set():
             raise BenchmarkError("Worker terminated during setup")
 
         # Benchmark workers have no completion-queue drain. This supported
         # one-shot mode makes native delegate_task calls return synchronously.
         declare_stateless_channel()
+        agent_options: dict[str, Any] = {
+            "role": "coordinator",
+            "budget": COORDINATOR_BUDGET,
+            "api_key": api_key,
+            "request": request,
+        }
+        if trace_adapter is not None:
+            agent_options["callbacks"] = trace_adapter.callbacks()
         coordinator = agent_factory(
-            role="coordinator",
-            budget=COORDINATOR_BUDGET,
-            api_key=api_key,
-            request=request,
+            **agent_options,
         )
+        if trace_adapter is not None:
+            trace_adapter.start_session(f"{request['taskId']}-coordinator")
         coordinator_result = coordinator.run_conversation(
             request["prompt"],
             system_message=COORDINATOR_SYSTEM_PROMPT,
@@ -486,6 +539,35 @@ def run_worker(
     workflow_complete = reconciled_workflow(
         records, audit_errors, coordinator_result, error
     )
+    trace_result = None
+    if trace_adapter is not None:
+        trace_status = (
+            "timeout"
+            if termination_requested.is_set()
+            else "completed"
+            if workflow_complete
+            else "failed"
+        )
+        try:
+            finalized_trace = trace_adapter.finish(
+                trace_status,
+                messages=coordinator_result.get("messages"),
+                error_message=error,
+            )
+            trace_result = {
+                "traceId": finalized_trace.trace_id,
+                "traceDirectory": finalized_trace.attempt_dir,
+                "traceHealth": finalized_trace.health,
+                "traceComplete": finalized_trace.complete,
+            }
+        except Exception as trace_error:
+            trace_result = {
+                "traceId": trace_adapter.identity.trace_id,
+                "traceDirectory": str(trace_adapter.attempt_dir),
+                "traceHealth": "failed",
+                "traceComplete": False,
+                "error": type(trace_error).__name__,
+            }
     result = {
         "schemaVersion": 1,
         "benchmark": WORKER_BENCHMARK,
@@ -540,6 +622,8 @@ def run_worker(
         "startedAt": started_at,
         "completedAt": utc_now(),
     }
+    if trace_result is not None:
+        result["trace"] = trace_result
     return _redact(result, api_key)
 
 

@@ -115,6 +115,7 @@ class InferenceOptions:
     setup_timeout_seconds: int
     restart: bool
     dry_run: bool
+    trace_dir: Path | None = None
     source_identity: dict[str, Any] | None = None
 
     @property
@@ -831,6 +832,11 @@ def run_inference(
                         for row in rows
                     ],
                     "output": str(paths.run_dir),
+                    "traceBase": (
+                        str(options.trace_dir.resolve())
+                        if options.trace_dir is not None
+                        else None
+                    ),
                 },
                 indent=2,
             )
@@ -851,11 +857,34 @@ def run_inference(
         )
     )
     summaries, predictions = _load_resume(frozen_options, paths, rows)
+    if options.trace_dir is not None and predictions:
+        raise BenchmarkError(
+            "Tracing cannot resume an inference run with completed instances; "
+            "use a fresh run id"
+        )
     swebench_verified.atomic_write_text(
         paths.instances,
         swebench_verified.encode_jsonl(row.public_dict() for row in rows),
     )
     swebench_verified.require_unchanged_source(frozen_options)
+    trace_run = None
+    if options.trace_dir is not None:
+        source_identity = swebench_verified._source_identity_for_options(
+            frozen_options
+        )
+        if (
+            source_identity["dirty"] is not False
+            or not isinstance(source_identity["commit"], str)
+            or not re.fullmatch(r"[0-9a-f]{40}", source_identity["commit"])
+        ):
+            raise BenchmarkError(
+                "Tracing requires a clean Hermes checkout at an exact Git revision"
+            )
+        from hermes_cli.benchmarks.tracing import create_hermes_trace_run
+
+        trace_run = create_hermes_trace_run(options.trace_dir, BENCHMARK)
+        swebench_verified.require_unchanged_source(frozen_options)
+        print(f"[trace] output: {trace_run.root}")
     _write_progress(frozen_options, paths, rows, summaries, predictions, complete=False)
     for row in rows[len(predictions) :]:
         instance_dir = paths.run_dir / "instances" / row.instance_id
@@ -867,17 +896,31 @@ def run_inference(
             )
             image_metadata["docker"] = docker_metadata
             swebench_verified.require_unchanged_source(frozen_options)
-            result = swebench_verified._run_worker(
-                frozen_options,
-                row,
-                instance_dir,
-                image,
-                image_metadata,
-                benchmark=BENCHMARK,
-                worker_module="hermes_cli.benchmarks.swebench_pro_worker",
-                prompt_builder=build_prompt,
-                worktree="/app",
-            )
+            if trace_run is None:
+                result = swebench_verified._run_worker(
+                    frozen_options,
+                    row,
+                    instance_dir,
+                    image,
+                    image_metadata,
+                    benchmark=BENCHMARK,
+                    worker_module="hermes_cli.benchmarks.swebench_pro_worker",
+                    prompt_builder=build_prompt,
+                    worktree="/app",
+                )
+            else:
+                result = swebench_verified._run_worker(
+                    frozen_options,
+                    row,
+                    instance_dir,
+                    image,
+                    image_metadata,
+                    benchmark=BENCHMARK,
+                    worker_module="hermes_cli.benchmarks.swebench_pro_worker",
+                    prompt_builder=build_prompt,
+                    worktree="/app",
+                    trace_run=trace_run,
+                )
         except Exception as exc:
             result = {
                 "modelPatch": "",
@@ -912,6 +955,23 @@ def run_inference(
         status = "ok" if summary["generationSucceeded"] else "failed"
         print(f"[{len(predictions)}/{len(rows)}] {row.instance_id}: {status}")
     swebench_verified.require_unchanged_source(frozen_options)
+    if trace_run is not None:
+        from hermes_cli.benchmarks.tracing import finalize_hermes_trace_run
+
+        try:
+            finalize_hermes_trace_run(
+                run=trace_run,
+                instance_ids=[row.instance_id for row in rows],
+                selection_strategy=(
+                    "explicit_ids" if options.instance_ids else "ordered_window"
+                ),
+            )
+        except Exception as exc:
+            print(
+                "[trace] Hermes trace run index could not be finalized; "
+                f"benchmark outputs remain valid: {type(exc).__name__}",
+                file=sys.stderr,
+            )
     return paths
 
 
@@ -1871,6 +1931,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     infer.add_argument("--restart", action="store_true")
     infer.add_argument("--dry-run", action="store_true")
+    infer.add_argument(
+        "--trace-dir",
+        type=Path,
+        help=(
+            "Opt-in benchmark-trace/v1 output base; each invocation creates "
+            "a private trace run"
+        ),
+    )
 
     evaluate = subparsers.add_parser(
         "evaluate", aliases=["eval"], help="Run Scale's pinned local Docker evaluator"
@@ -1918,6 +1986,7 @@ def options_from_args(args: argparse.Namespace) -> InferenceOptions:
         setup_timeout_seconds=args.setup_timeout_seconds,
         restart=args.restart,
         dry_run=args.dry_run,
+        trace_dir=args.trace_dir,
     )
 
 
