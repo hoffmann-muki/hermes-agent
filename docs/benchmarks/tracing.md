@@ -25,3 +25,36 @@ identity through non-secret trace metadata.
 A new tracing implementation is required only for a genuinely new agent
 framework or execution harness. Missing native hooks are reported through the
 capability matrix rather than inferred.
+
+## Runtime collection
+
+Passing `--trace-dir <base-directory>` to a Hermes SWE-bench or Terminal-Bench
+inference command enables capture inside that benchmark process. The runner
+creates a private `trace-run-<uuid>` before provider work and the native
+callbacks record activity as the agent performs it. This is not post-hoc log
+extraction, and no collector command needs to run before, during, or after the
+benchmark.
+
+SWE runners print the exact trace-run path. Terminal-Bench persists it in the
+benchmark manifest and prints it at completion. The supplied base remains a
+stable discovery location containing finalized trace-run children.
+
+## Researcher tooling
+
+The canonical OpenHands-benchmarks environment provides one read-only
+`benchmark-trace` CLI for output from Hermes, OpenCode, and OpenHands:
+
+```bash
+uv run benchmark-trace validate /path/to/traces
+uv run benchmark-trace inspect /path/to/traces/trace-run-<uuid>
+uv run benchmark-trace summarize /path/to/traces/trace-run-<uuid>
+uv run benchmark-trace render /path/to/traces/trace-run-<uuid>
+uv run benchmark-trace compare <trace-run-a> <trace-run-b>
+```
+
+The tool operates on the normalized contract rather than framework or benchmark
+names. It validates, inspects provenance and capability boundaries, aggregates
+activity and timing, checks comparison parity, and renders deterministic nested
+timelines. `--format json` provides machine-readable output. It never launches
+Hermes or collects a trace, and it does not inspect artifact contents or
+calculate token usage or cost.
