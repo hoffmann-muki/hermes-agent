@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Sequence, cast
 
 import pytest
 
@@ -11,12 +11,18 @@ from hermes_cli.benchmarks import swebench_pro, swebench_verified
 from hermes_cli.benchmarks import swebench_verified_worker as worker
 from hermes_cli.benchmarks.tracing import (
     HermesTraceRun,
+    TraceHarnessAdapter,
+    TraceRun,
+    TraceSelection,
     create_hermes_attempt_trace,
     create_hermes_trace_run,
+    create_trace_run,
     finalize_hermes_trace_run,
+    finalize_trace_run,
 )
 from hermes_cli.benchmarks import tracing as tracing_package
 from hermes_cli.benchmarks.tracing.harbor import (
+    HarborTraceHarness,
     allocate_harbor_trace_attempt,
     finalize_harbor_trace_run,
     promote_harbor_trace_attempt,
@@ -29,19 +35,66 @@ REVISION = "a" * 40
 MODEL = "openrouter/qwen/qwen3-coder-next"
 
 
+class _CustomHarness:
+    prepared = False
+
+    def prepare_finalization(self, run: TraceRun) -> None:
+        assert run.benchmark == "custom-benchmark"
+        self.prepared = True
+
+    def resolve_selection(
+        self,
+        run: TraceRun,
+        observed_instance_ids: Sequence[str],
+    ) -> TraceSelection:
+        assert run.framework == "hermes"
+        assert tuple(observed_instance_ids) == ("custom-instance",)
+        return TraceSelection(
+            instance_ids=("custom-instance",),
+            strategy="explicit_ids",
+        )
+
+
+def test_generic_coordinator_supports_an_arbitrary_benchmark(tmp_path):
+    run = create_trace_run(
+        tmp_path / "traces",
+        benchmark="custom-benchmark",
+        framework="hermes",
+    )
+    adapter = create_hermes_attempt_trace(
+        run=run,
+        instance_id="custom-instance",
+        attempt=1,
+        framework_revision=REVISION,
+        model=MODEL,
+        agent_timeout_seconds=30,
+        evaluation_workers=1,
+    )
+    adapter.start_session("custom-session")
+    adapter.finish("completed", messages=[])
+    custom_harness = _CustomHarness()
+    harness: TraceHarnessAdapter = custom_harness
+
+    path = finalize_trace_run(run, harness)
+
+    assert custom_harness.prepared
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["benchmark"] == "custom-benchmark"
+    assert document["framework"] == "hermes"
+    assert document["selection"]["instance_ids"] == ["custom-instance"]
+
+
 def test_harbor_job_lock_preserves_resolved_task_order(tmp_path):
     job = tmp_path / "jobs" / "run"
     job.mkdir(parents=True)
     (job / "lock.json").write_text(
-        json.dumps(
-            {
-                "trials": [
-                    {"task": {"name": "terminal-bench/task-b"}},
-                    {"task": {"name": "terminal-bench/task-a"}},
-                    {"task": {"name": "terminal-bench/task-b"}},
-                ]
-            }
-        ),
+        json.dumps({
+            "trials": [
+                {"task": {"name": "terminal-bench/task-b"}},
+                {"task": {"name": "terminal-bench/task-a"}},
+                {"task": {"name": "terminal-bench/task-b"}},
+            ]
+        }),
         encoding="utf-8",
     )
 
@@ -51,25 +104,50 @@ def test_harbor_job_lock_preserves_resolved_task_order(tmp_path):
     ]
 
 
+def test_harbor_harness_resolves_any_benchmark_identity(tmp_path):
+    job = tmp_path / "jobs" / "custom"
+    job.mkdir(parents=True)
+    (job / "lock.json").write_text(
+        json.dumps({"trials": [{"task": {"name": "custom/task-a"}}]}),
+        encoding="utf-8",
+    )
+    run = create_trace_run(
+        tmp_path / "traces",
+        benchmark="custom-harbor-benchmark",
+        framework="hermes",
+    )
+    harness = HarborTraceHarness(
+        jobs_dir=tmp_path / "jobs",
+        job_name="custom",
+        selected_instance_ids=None,
+        expected_instance_count=1,
+        expected_attempts_per_instance=1,
+        selection_strategy="full_dataset",
+    )
+
+    selection = harness.resolve_selection(run, ())
+
+    assert selection.instance_ids == ("task-a",)
+    assert selection.strategy == "full_dataset"
+
+
 def test_harbor_bridge_preserves_multiple_native_attempts(tmp_path, monkeypatch):
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     (task_dir / "task.toml").write_text(
         "[agent]\ntimeout_sec = 900\n\n"
-        "[environment]\ndocker_image = \"example/task:latest\"\n",
+        '[environment]\ndocker_image = "example/task:latest"\n',
         encoding="utf-8",
     )
     logs_dir = tmp_path / "job" / "trial" / "agent"
     logs_dir.mkdir(parents=True)
     (logs_dir.parent / "config.json").write_text(
-        json.dumps(
-            {
-                "task": {
-                    "name": "terminal-bench/task-a",
-                    "ref": "sha256:" + "a" * 64,
-                }
+        json.dumps({
+            "task": {
+                "name": "terminal-bench/task-a",
+                "ref": "sha256:" + "a" * 64,
             }
-        ),
+        }),
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -154,13 +232,11 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
         evaluation_workers=1,
     )
     adapter.start_session("task-coordinator")
-    adapter.container_observed(
-        {
-            "container_id": "a" * 64,
-            "image": "example/task:latest",
-            "worktree": "/testbed",
-        }
-    )
+    adapter.container_observed({
+        "container_id": "a" * 64,
+        "image": "example/task:latest",
+        "worktree": "/testbed",
+    })
     adapter.on_step(
         1,
         [
@@ -285,9 +361,7 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
     capabilities = json.loads(
         (attempt_dir / "capabilities.json").read_text(encoding="utf-8")
     )
-    states = {
-        item["category"]: item["state"] for item in capabilities["capabilities"]
-    }
+    states = {item["category"]: item["state"] for item in capabilities["capabilities"]}
     assert states["tool.result"] == "captured"
     assert states["tool.timing"] == "captured"
     assert states["delegation"] == "captured"
@@ -417,7 +491,13 @@ def test_swe_cli_trace_directory_is_explicit_and_inference_only(parser, tmp_path
     args = parser().parse_args(["infer", "--trace-dir", str(tmp_path)])
     assert args.trace_dir == tmp_path
     with pytest.raises(SystemExit):
-        parser().parse_args(["evaluate", "--run-id", "test", "--trace-dir", str(tmp_path)])
+        parser().parse_args([
+            "evaluate",
+            "--run-id",
+            "test",
+            "--trace-dir",
+            str(tmp_path),
+        ])
 
 
 def test_trace_revision_must_be_exact(tmp_path):
@@ -435,14 +515,12 @@ def test_trace_revision_must_be_exact(tmp_path):
 
 
 def test_verified_controller_passes_one_private_trace_run(tmp_path, monkeypatch):
-    row = swebench_verified.parse_swebench_row(
-        {
-            "repo": "owner/repo",
-            "instance_id": INSTANCE,
-            "base_commit": REVISION,
-            "problem_statement": "Fix it.",
-        }
-    )
+    row = swebench_verified.parse_swebench_row({
+        "repo": "owner/repo",
+        "instance_id": INSTANCE,
+        "base_commit": REVISION,
+        "problem_statement": "Fix it.",
+    })
 
     class Dataset:
         def select(self, *_args, **_kwargs):
@@ -476,12 +554,12 @@ def test_verified_controller_passes_one_private_trace_run(tmp_path, monkeypatch)
             "timedOut": False,
         }
 
-    def finalize(**kwargs):
-        observed["finalize"] = kwargs
-        return kwargs["run"].root / "run.json"
+    def finalize(run, harness):
+        observed["finalize"] = (run, harness)
+        return run.root / "run.json"
 
     monkeypatch.setattr(swebench_verified, "_run_worker", run_worker)
-    monkeypatch.setattr(tracing_package, "finalize_hermes_trace_run", finalize)
+    monkeypatch.setattr(tracing_package, "finalize_trace_run", finalize)
     options = swebench_verified.InferenceOptions(
         run_id="trace-verified",
         output_dir=tmp_path / "runs",
@@ -506,24 +584,22 @@ def test_verified_controller_passes_one_private_trace_run(tmp_path, monkeypatch)
     )
 
     assert observed["run"].root.parent == (tmp_path / "traces").resolve()
-    assert observed["finalize"]["run"] == observed["run"]
-    assert observed["finalize"]["instance_ids"] == [INSTANCE]
-    assert observed["finalize"]["selection_strategy"] == "explicit_ids"
+    assert observed["finalize"][0] == observed["run"]
+    assert observed["finalize"][1].selection.instance_ids == (INSTANCE,)
+    assert observed["finalize"][1].selection.strategy == "explicit_ids"
 
 
 def test_pro_controller_uses_the_same_trace_lifecycle(tmp_path, monkeypatch):
-    row = swebench_pro.parse_swebench_pro_row(
-        {
-            "repo": "owner/repo",
-            "instance_id": INSTANCE,
-            "base_commit": REVISION,
-            "problem_statement": "Fix it.",
-            "requirements": "",
-            "interface": "",
-            "repo_language": "Python",
-            "dockerhub_tag": "owner__repo-1",
-        }
-    )
+    row = swebench_pro.parse_swebench_pro_row({
+        "repo": "owner/repo",
+        "instance_id": INSTANCE,
+        "base_commit": REVISION,
+        "problem_statement": "Fix it.",
+        "requirements": "",
+        "interface": "",
+        "repo_language": "Python",
+        "dockerhub_tag": "owner__repo-1",
+    })
 
     class Dataset:
         def select(self, *_args, **_kwargs):
@@ -557,12 +633,12 @@ def test_pro_controller_uses_the_same_trace_lifecycle(tmp_path, monkeypatch):
             "timedOut": False,
         }
 
-    def finalize(**kwargs):
-        observed["finalize"] = kwargs
-        return kwargs["run"].root / "run.json"
+    def finalize(run, harness):
+        observed["finalize"] = (run, harness)
+        return run.root / "run.json"
 
     monkeypatch.setattr(swebench_verified, "_run_worker", run_worker)
-    monkeypatch.setattr(tracing_package, "finalize_hermes_trace_run", finalize)
+    monkeypatch.setattr(tracing_package, "finalize_trace_run", finalize)
     options = swebench_pro.InferenceOptions(
         run_id="trace-pro",
         output_dir=tmp_path / "runs",
@@ -586,6 +662,6 @@ def test_pro_controller_uses_the_same_trace_lifecycle(tmp_path, monkeypatch):
     )
 
     assert observed["run"].root.parent == (tmp_path / "traces").resolve()
-    assert observed["finalize"]["run"] == observed["run"]
-    assert observed["finalize"]["instance_ids"] == [INSTANCE]
-    assert observed["finalize"]["selection_strategy"] == "explicit_ids"
+    assert observed["finalize"][0] == observed["run"]
+    assert observed["finalize"][1].selection.instance_ids == (INSTANCE,)
+    assert observed["finalize"][1].selection.strategy == "explicit_ids"

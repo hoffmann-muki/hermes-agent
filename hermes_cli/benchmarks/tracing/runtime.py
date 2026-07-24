@@ -879,6 +879,7 @@ def write_run_index(
     root: Path,
     run_id: str,
     benchmark: str,
+    framework: str,
     created_at: str,
     instance_ids: Sequence[str],
     selection_strategy: str,
@@ -903,7 +904,7 @@ def write_run_index(
                 not isinstance(manifest, dict)
                 or manifest.get("run_id") != run_id
                 or manifest.get("benchmark") != benchmark
-                or manifest.get("framework") != "hermes"
+                or manifest.get("framework") != framework
                 or manifest.get("instance_id") != instance_id
                 or manifest.get("attempt")
                 != int(attempt_dir.name.removeprefix("attempt-"))
@@ -949,7 +950,7 @@ def write_run_index(
         },
         "run_id": run_id,
         "benchmark": benchmark,
-        "framework": "hermes",
+        "framework": framework,
         "created_at": created_at,
         "finalized_at": utc_now(),
         "selection": {

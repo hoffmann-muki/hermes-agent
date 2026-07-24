@@ -12,10 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-from hermes_cli.benchmarks.tracing.runtime import (
-    attempt_directory,
-    write_run_index,
+from hermes_cli.benchmarks.tracing.coordination import (
+    TraceRun,
+    TraceSelection,
+    TraceSelectionStrategy,
+    attach_trace_run,
+    finalize_trace_run,
 )
+from hermes_cli.benchmarks.tracing.runtime import attempt_directory
 
 
 _ALLOCATION_FILENAME = ".harbor-attempts.json"
@@ -29,6 +33,51 @@ class HarborTraceAttempt:
     agent_timeout_seconds: float
     container_image: str
     container_root: Path
+
+
+@dataclass(frozen=True)
+class HarborTraceHarness:
+    """Reusable run-finalization adapter for any Harbor benchmark."""
+
+    jobs_dir: Path | None
+    job_name: str | None
+    selected_instance_ids: tuple[str, ...] | None
+    expected_instance_count: int
+    expected_attempts_per_instance: int
+    selection_strategy: TraceSelectionStrategy
+    allow_observed_fallback: bool = False
+
+    def prepare_finalization(self, run: TraceRun) -> None:
+        _remove_allocator_files(run.root)
+
+    def resolve_selection(
+        self,
+        run: TraceRun,
+        observed_instance_ids: Sequence[str],
+    ) -> TraceSelection:
+        del run
+        if self.selected_instance_ids is not None:
+            instance_ids = self.selected_instance_ids
+        elif self.allow_observed_fallback:
+            instance_ids = tuple(sorted(observed_instance_ids))
+        else:
+            if self.jobs_dir is None or not self.job_name:
+                raise ValueError(
+                    "Harbor trace selection requires a job lock or explicit IDs"
+                )
+            instance_ids = tuple(
+                trace_instance_ids_from_job(self.jobs_dir, self.job_name)
+            )
+        if len(instance_ids) != self.expected_instance_count:
+            raise ValueError(
+                "Trace run index omitted because the resolved instance count "
+                f"{len(instance_ids)} does not match {self.expected_instance_count}"
+            )
+        return TraceSelection(
+            instance_ids=instance_ids,
+            strategy=self.selection_strategy,
+            minimum_attempts_per_instance=self.expected_attempts_per_instance,
+        )
 
 
 def allocate_harbor_trace_attempt(
@@ -102,53 +151,31 @@ def finalize_harbor_trace_run(
     selected_instance_ids: Sequence[str] | None,
     expected_instance_count: int,
     expected_attempts_per_instance: int,
-    selection_strategy: str,
+    selection_strategy: TraceSelectionStrategy,
 ) -> Path:
-    """Require complete promoted coverage, then write the shared run index."""
+    """Compatibility wrapper around the generic trace-run coordinator."""
 
-    root = trace_root.resolve()
-    _remove_allocator_files(root)
-    observed: dict[str, set[int]] = {}
-    for path in sorted(root.glob("instances/*/attempt-*/manifest.json")):
-        value = json.loads(path.read_text(encoding="utf-8"))
-        if (
-            isinstance(value, dict)
-            and value.get("run_id") == run_id
-            and value.get("benchmark") == benchmark
-            and value.get("framework") == "hermes"
-            and isinstance(value.get("instance_id"), str)
-            and isinstance(value.get("attempt"), int)
-        ):
-            observed.setdefault(value["instance_id"], set()).add(value["attempt"])
-
-    instance_ids = (
-        list(selected_instance_ids)
-        if selected_instance_ids is not None
-        else sorted(observed)
-    )
-    if len(instance_ids) != expected_instance_count:
-        raise ValueError(
-            "Trace run index omitted because the observed instance count "
-            f"{len(instance_ids)} does not match {expected_instance_count}"
-        )
-    if set(instance_ids) != set(observed):
-        raise ValueError(
-            "Trace run index omitted because selected instances lack finalized traces"
-        )
-    if any(
-        len(attempts) < expected_attempts_per_instance
-        for attempts in observed.values()
-    ):
-        raise ValueError(
-            "Trace run index omitted because an instance lacks a requested attempt"
-        )
-    return write_run_index(
-        root=root,
-        run_id=run_id,
-        benchmark=benchmark,
-        created_at=created_at,
-        instance_ids=instance_ids,
-        selection_strategy=selection_strategy,
+    return finalize_trace_run(
+        attach_trace_run(
+            root=trace_root,
+            run_id=run_id,
+            created_at=created_at,
+            benchmark=benchmark,
+            framework="hermes",
+        ),
+        HarborTraceHarness(
+            jobs_dir=None,
+            job_name=None,
+            selected_instance_ids=(
+                tuple(selected_instance_ids)
+                if selected_instance_ids is not None
+                else None
+            ),
+            expected_instance_count=expected_instance_count,
+            expected_attempts_per_instance=expected_attempts_per_instance,
+            selection_strategy=selection_strategy,
+            allow_observed_fallback=selected_instance_ids is None,
+        ),
     )
 
 
@@ -166,9 +193,7 @@ def trace_instance_id_from_trial_config(logs_dir: Path) -> str:
 def trace_instance_ids_from_job(jobs_dir: Path, job_name: str) -> list[str]:
     """Return Harbor's resolved task order with repeated attempts collapsed."""
 
-    value = json.loads(
-        (jobs_dir / job_name / "lock.json").read_text(encoding="utf-8")
-    )
+    value = json.loads((jobs_dir / job_name / "lock.json").read_text(encoding="utf-8"))
     trials = value.get("trials") if isinstance(value, dict) else None
     if not isinstance(trials, list):
         raise ValueError("Harbor job lock has no resolved trials")
@@ -222,9 +247,7 @@ def trace_container_image_from_trial_config(logs_dir: Path) -> str:
     with (_resolved_task_path(task) / "task.toml").open("rb") as file:
         task_document = tomllib.load(file)
     environment = task_document.get("environment")
-    image = (
-        environment.get("docker_image") if isinstance(environment, dict) else None
-    )
+    image = environment.get("docker_image") if isinstance(environment, dict) else None
     if not isinstance(image, str) or not image:
         raise ValueError("Harbor task has no Docker image")
     return image

@@ -880,9 +880,13 @@ def run_inference(
             raise BenchmarkError(
                 "Tracing requires a clean Hermes checkout at an exact Git revision"
             )
-        from hermes_cli.benchmarks.tracing import create_hermes_trace_run
+        from hermes_cli.benchmarks.tracing import create_trace_run
 
-        trace_run = create_hermes_trace_run(options.trace_dir, BENCHMARK)
+        trace_run = create_trace_run(
+            options.trace_dir,
+            benchmark=BENCHMARK,
+            framework="hermes",
+        )
         swebench_verified.require_unchanged_source(frozen_options)
         print(f"[trace] output: {trace_run.root}")
     _write_progress(frozen_options, paths, rows, summaries, predictions, complete=False)
@@ -956,14 +960,24 @@ def run_inference(
         print(f"[{len(predictions)}/{len(rows)}] {row.instance_id}: {status}")
     swebench_verified.require_unchanged_source(frozen_options)
     if trace_run is not None:
-        from hermes_cli.benchmarks.tracing import finalize_hermes_trace_run
+        from hermes_cli.benchmarks.tracing import (
+            DirectTraceHarness,
+            TraceSelection,
+            finalize_trace_run,
+        )
 
         try:
-            finalize_hermes_trace_run(
-                run=trace_run,
-                instance_ids=[row.instance_id for row in rows],
-                selection_strategy=(
-                    "explicit_ids" if options.instance_ids else "ordered_window"
+            finalize_trace_run(
+                trace_run,
+                DirectTraceHarness(
+                    TraceSelection(
+                        instance_ids=tuple(row.instance_id for row in rows),
+                        strategy=(
+                            "explicit_ids"
+                            if options.instance_ids
+                            else "ordered_window"
+                        ),
+                    )
                 ),
             )
         except Exception as exc:

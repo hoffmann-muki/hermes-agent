@@ -1,14 +1,20 @@
-"""Lifecycle integration between Hermes benchmark runners and trace adapters."""
+"""Hermes-native trace adapter construction for benchmark runners."""
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
-from uuid import uuid4
 
+from hermes_cli.benchmarks.tracing.coordination import (
+    DirectTraceHarness,
+    TraceRun,
+    TraceSelection,
+    TraceSelectionStrategy,
+    create_trace_run,
+    finalize_trace_run,
+)
 from hermes_cli.benchmarks.tracing.hermes import (
     HermesTraceAdapter,
     hermes_capabilities,
@@ -19,50 +25,29 @@ from hermes_cli.benchmarks.tracing.runtime import (
     TraceIdentity,
     TraceRecorder,
     attempt_directory,
-    utc_now,
-    write_run_index,
 )
 
 
 @dataclass(frozen=True)
-class HermesTraceRun:
-    id: str
-    root: Path
-    created_at: str
-    benchmark: str
+class HermesTraceRun(TraceRun):
+    """Backward-compatible Hermes-bound trace-run identity."""
+
+    framework: str = "hermes"
 
 
-def create_hermes_trace_run(base_directory: Path, benchmark: str) -> HermesTraceRun:
-    """Create one private trace root before any benchmark agent work."""
+def create_hermes_trace_run(base_directory: Path, benchmark: str) -> TraceRun:
+    """Compatibility wrapper around generic trace-run creation."""
 
-    expanded = base_directory.expanduser()
-    if expanded.is_symlink():
-        raise ValueError(f"Trace base cannot be a symbolic link: {expanded}")
-    base = expanded.resolve()
-    existed = base.exists()
-    base.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if not base.is_dir() or base.is_symlink():
-        raise ValueError(f"Trace base must be a real directory: {base}")
-    if not existed and os.name != "nt":
-        base.chmod(0o700)
-    run_id = f"trace-run-{uuid4().hex}"
-    root = base / run_id
-    root.mkdir(mode=0o700)
-    if root.is_symlink() or not root.is_dir():
-        raise ValueError(f"Trace root must be a real directory: {root}")
-    if os.name != "nt":
-        root.chmod(0o700)
-    return HermesTraceRun(
-        id=run_id,
-        root=root,
-        created_at=utc_now(),
+    return create_trace_run(
+        base_directory,
         benchmark=benchmark,
+        framework="hermes",
     )
 
 
 def create_hermes_attempt_trace(
     *,
-    run: HermesTraceRun,
+    run: TraceRun,
     instance_id: str,
     attempt: int,
     framework_revision: str,
@@ -73,8 +58,21 @@ def create_hermes_attempt_trace(
     harness_revision: str | None = None,
     agent_image: str | None = None,
 ) -> HermesTraceAdapter:
+    if run.framework != "hermes":
+        raise ValueError("Hermes trace adapter requires framework='hermes'")
     if not re.fullmatch(r"[0-9a-f]{40}", framework_revision):
         raise ValueError("Tracing requires an exact 40-character Hermes revision")
+    if (
+        not instance_id
+        or isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or attempt < 1
+        or not model
+        or evaluation_workers < 1
+        or agent_timeout_seconds <= 0
+        or benchmark_retries < 0
+    ):
+        raise ValueError("Hermes trace attempt metadata is invalid")
     identity = TraceIdentity.create(
         run_id=run.id,
         benchmark=run.benchmark,
@@ -130,15 +128,18 @@ def create_hermes_attempt_trace(
 
 def finalize_hermes_trace_run(
     *,
-    run: HermesTraceRun,
+    run: TraceRun,
     instance_ids: Sequence[str],
-    selection_strategy: str,
+    selection_strategy: TraceSelectionStrategy,
 ) -> Path:
-    return write_run_index(
-        root=run.root,
-        run_id=run.id,
-        benchmark=run.benchmark,
-        created_at=run.created_at,
-        instance_ids=instance_ids,
-        selection_strategy=selection_strategy,
+    """Compatibility wrapper around generic direct-harness finalization."""
+
+    return finalize_trace_run(
+        run,
+        DirectTraceHarness(
+            TraceSelection(
+                instance_ids=tuple(instance_ids),
+                strategy=selection_strategy,
+            )
+        ),
     )

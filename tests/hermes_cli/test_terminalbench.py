@@ -40,14 +40,8 @@ def test_safe_defaults_match_peer_terminal_bench_runners():
     assert worker.DELEGATION_MODE == benchmark.DEFAULT_DELEGATION_MODE
     assert worker.COORDINATOR_BUDGET == benchmark.DEFAULT_COORDINATOR_BUDGET
     assert worker.PEER_PHASE_BUDGETS == benchmark.DEFAULT_PHASE_BUDGETS
-    assert (
-        worker.NATIVE_SUBAGENT_BUDGET
-        == benchmark.DEFAULT_NATIVE_SUBAGENT_BUDGET
-    )
-    assert (
-        worker.NATIVE_SUBAGENT_COUNT
-        == benchmark.DEFAULT_NATIVE_SUBAGENT_COUNT
-    )
+    assert worker.NATIVE_SUBAGENT_BUDGET == benchmark.DEFAULT_NATIVE_SUBAGENT_BUDGET
+    assert worker.NATIVE_SUBAGENT_COUNT == benchmark.DEFAULT_NATIVE_SUBAGENT_COUNT
     assert worker.TEMPERATURE == 0.1
     assert worker.API_MAX_RETRIES == 1
 
@@ -165,6 +159,7 @@ def test_trace_command_passes_nonsecret_trial_metadata(tmp_path: Path):
     assert options.trace_dir == tmp_path / "traces"
     assert f"trace_root={trace_run.root}" in agent_kwargs
     assert "trace_run_id=trace-run-test" in agent_kwargs
+    assert "trace_benchmark=terminal-bench-2.1" in agent_kwargs
     assert "evaluation_workers=1" in agent_kwargs
     assert "benchmark_retries=0" in agent_kwargs
     assert "harbor_version=0.20.0" in agent_kwargs
@@ -245,9 +240,7 @@ def native_delegation_messages(phases=("navigator", "patcher", "reviewer")):
 
 
 def test_native_delegation_audit_records_sequential_leaf_handoffs():
-    records, errors = worker.audit_native_delegations(
-        native_delegation_messages()
-    )
+    records, errors = worker.audit_native_delegations(native_delegation_messages())
 
     assert errors == []
     assert [record["phase"] for record in records] == list(worker.PHASE_ORDER)

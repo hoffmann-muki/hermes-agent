@@ -116,6 +116,10 @@ remain authoritative. Trace failures after the attempt begins cannot change the
 benchmark outcome or initiate a retry. Token usage and cost are deliberately
 excluded from the normalized trace.
 
+Terminal-Bench uses the reusable Harbor tracing adapter described in
+[Benchmark tracing architecture](tracing.md); its benchmark identity is
+configuration rather than hard-coded trace extraction logic.
+
 Artifacts are written below:
 
 ```text

@@ -89,6 +89,9 @@ IDs, images, budgets, and output paths without Docker or an API call.
 
 ### Opt-in research tracing
 
+The reusable tracing architecture and extension boundary are documented in
+[Benchmark tracing architecture](tracing.md).
+
 Add `--trace-dir <base-directory>` to emit the shared
 `benchmark-trace/v1` format used by the OpenCode and OpenHands integrations:
 

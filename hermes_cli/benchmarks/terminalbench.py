@@ -24,12 +24,12 @@ from hermes_cli.benchmarks.swebench_verified import (
     utc_now,
 )
 from hermes_cli.benchmarks.tracing import (
-    HermesTraceRun,
-    create_hermes_trace_run,
+    TraceRun,
+    create_trace_run,
+    finalize_trace_run,
 )
 from hermes_cli.benchmarks.tracing.harbor import (
-    finalize_harbor_trace_run,
-    trace_instance_ids_from_job,
+    HarborTraceHarness,
 )
 
 
@@ -328,7 +328,7 @@ def build_harbor_command(
     options: Options,
     jobs_dir: Path,
     *,
-    trace_run: HermesTraceRun | None = None,
+    trace_run: TraceRun | None = None,
     harbor_version: str = "unknown",
 ) -> list[str]:
     agent_kwargs = [
@@ -342,6 +342,7 @@ def build_harbor_command(
                 f"trace_root={trace_run.root}",
                 f"trace_run_id={trace_run.id}",
                 f"trace_created_at={trace_run.created_at}",
+                f"trace_benchmark={trace_run.benchmark}",
                 f"evaluation_workers={options.concurrency}",
                 f"benchmark_retries={options.max_retries}",
                 f"harbor_version={harbor_version}",
@@ -508,7 +509,7 @@ def manifest(
     paths: RunPaths,
     command: Sequence[str],
     *,
-    trace_run: HermesTraceRun | None = None,
+    trace_run: TraceRun | None = None,
 ) -> dict[str, Any]:
     return {
         "schemaVersion": 1,
@@ -576,7 +577,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     trace_run = (
-        create_hermes_trace_run(options.trace_dir, BENCHMARK)
+        create_trace_run(
+            options.trace_dir,
+            benchmark=BENCHMARK,
+            framework="hermes",
+        )
         if options.trace_dir is not None
         else None
     )
@@ -606,27 +611,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             else OFFICIAL_TASK_COUNT
         )
         try:
-            finalize_harbor_trace_run(
-                trace_root=trace_run.root,
-                run_id=trace_run.id,
-                benchmark=trace_run.benchmark,
-                created_at=trace_run.created_at,
-                selected_instance_ids=(
-                    options.task_names
-                    if options.task_names
-                    else trace_instance_ids_from_job(
-                        paths.jobs_dir,
-                        options.run_id,
-                    )
-                ),
-                expected_instance_count=expected_count,
-                expected_attempts_per_instance=options.attempts,
-                selection_strategy=(
-                    "explicit_ids"
-                    if options.task_names
-                    else "ordered_window"
-                    if options.max_tasks is not None
-                    else "full_dataset"
+            finalize_trace_run(
+                trace_run,
+                HarborTraceHarness(
+                    jobs_dir=paths.jobs_dir,
+                    job_name=options.run_id,
+                    selected_instance_ids=(
+                        tuple(options.task_names) if options.task_names else None
+                    ),
+                    expected_instance_count=expected_count,
+                    expected_attempts_per_instance=options.attempts,
+                    selection_strategy=(
+                        "explicit_ids"
+                        if options.task_names
+                        else "ordered_window"
+                        if options.max_tasks is not None
+                        else "full_dataset"
+                    ),
                 ),
             )
         except Exception as exc:
