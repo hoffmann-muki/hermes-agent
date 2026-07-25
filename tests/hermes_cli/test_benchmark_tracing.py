@@ -119,6 +119,42 @@ def test_error_level_trace_issue_marks_attempt_failed_and_partial(tmp_path):
     assert health["finalization"] == "partial"
 
 
+def test_invalid_native_identifier_is_rejected_before_persistence(tmp_path):
+    run = create_hermes_trace_run(tmp_path / "traces", "swe-bench-verified")
+    adapter = create_hermes_attempt_trace(
+        run=run,
+        instance_id=INSTANCE,
+        attempt=1,
+        framework_revision=REVISION,
+        model=MODEL,
+        agent_timeout_seconds=1800,
+        evaluation_workers=1,
+    )
+    adapter.start_session("x" * 600)
+
+    result = adapter.finish(
+        "failed",
+        messages=[],
+        error_message="Synthetic agent failure",
+    )
+    events = [
+        json.loads(line)
+        for line in (Path(result.attempt_dir) / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    health = json.loads(
+        (Path(result.attempt_dir) / "health.json").read_text(encoding="utf-8")
+    )
+
+    assert result.health == "failed"
+    assert "event.invalid" in {issue["code"] for issue in health["issues"]}
+    assert all(
+        not isinstance(event.get("session_id"), str) or len(event["session_id"]) <= 512
+        for event in events
+    )
+
+
 def test_harbor_job_lock_preserves_resolved_task_order(tmp_path):
     job = tmp_path / "jobs" / "run"
     job.mkdir(parents=True)

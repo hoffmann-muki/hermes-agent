@@ -7,13 +7,14 @@ import binascii
 import gzip
 import hashlib
 import json
+import math
 import os
 import re
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence, cast
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -46,6 +47,63 @@ CAPABILITY_CATEGORIES = (
     "patch",
     "native.evidence",
 )
+_EVENT_FAMILIES = {
+    "run",
+    "instance",
+    "attempt",
+    "harness",
+    "container",
+    "evaluator",
+    "agent",
+    "model",
+    "provider",
+    "tool",
+    "shell",
+    "file",
+    "search",
+    "browser",
+    "delegation",
+    "context",
+    "memory",
+    "patch",
+    "trace",
+}
+_EVENT_STATUSES = {
+    "started",
+    "completed",
+    "failed",
+    "cancelled",
+    "timeout",
+    "degraded",
+    "unknown",
+}
+_TERMINAL_STATUSES = {
+    "completed",
+    "failed",
+    "cancelled",
+    "timeout",
+    "degraded",
+}
+_CAPTURE_METHODS = {
+    "native_hook",
+    "native_stream",
+    "native_export",
+    "derived",
+    "generic_harness",
+}
+_TIMING_FIDELITIES = {
+    "native_monotonic",
+    "native_wall",
+    "derived",
+    "not_available",
+}
+_RELATION_TYPES = {
+    "caused_by",
+    "contains",
+    "derived_from",
+    "native_evidence",
+    "retry_of",
+}
 
 JsonObject = dict[str, Any]
 TraceStatus = Literal["completed", "failed", "cancelled", "timeout", "degraded"]
@@ -361,6 +419,180 @@ def canonical_json(value: Any) -> bytes:
     return content.encode("utf-8") + b"\n"
 
 
+def _valid_identifier(value: object) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= 512
+
+
+def _valid_slug(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) <= 128
+        and re.fullmatch(r"[a-z][a-z0-9._-]*", value)
+    )
+
+
+def _valid_timestamp(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _valid_event_contract_fields(
+    *,
+    event_type: object,
+    event_family: object,
+    phase: object,
+    status: object,
+    event_id: object,
+    span_id: object,
+    occurred_at: object,
+    origin: object,
+    timing: object,
+    error: object,
+    relations: Sequence[object],
+    identifiers: Sequence[object],
+) -> bool:
+    if (
+        not isinstance(event_type, str)
+        or len(event_type) > 128
+        or not re.fullmatch(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+", event_type)
+        or not isinstance(event_family, str)
+        or event_family not in _EVENT_FAMILIES
+        or not isinstance(phase, str)
+        or phase not in {"start", "end", "instant"}
+        or not isinstance(status, str)
+        or status not in _EVENT_STATUSES
+        or (phase == "start" and status != "started")
+        or (phase == "end" and status not in _TERMINAL_STATUSES)
+        or (phase == "instant" and status == "started")
+        or not _valid_identifier(event_id)
+        or not _valid_identifier(span_id)
+        or any(
+            value is not None and not _valid_identifier(value) for value in identifiers
+        )
+        or not _valid_timestamp(occurred_at)
+        or not _valid_origin(origin)
+        or not _valid_timing(timing, phase)
+        or not _valid_error(error)
+        or not _valid_relations(relations)
+    ):
+        return False
+    return True
+
+
+def _valid_origin(value: object) -> bool:
+    if not isinstance(value, Mapping) or not set(value).issubset({
+        "component",
+        "capture_method",
+        "native_event_type",
+        "native_event_id",
+    }):
+        return False
+    origin = cast(Mapping[str, object], value)
+    component = origin.get("component")
+    capture_method = origin.get("capture_method")
+    native_event_type = origin.get("native_event_type")
+    native_event_id = origin.get("native_event_id")
+    return bool(
+        isinstance(component, str)
+        and 0 < len(component) <= 256
+        and isinstance(capture_method, str)
+        and capture_method in _CAPTURE_METHODS
+        and (
+            "native_event_type" not in origin
+            or isinstance(native_event_type, str)
+            and 0 < len(native_event_type) <= 256
+        )
+        and ("native_event_id" not in origin or _valid_identifier(native_event_id))
+    )
+
+
+def _valid_timing(value: object, phase: object) -> bool:
+    if not isinstance(value, Mapping) or not set(value).issubset({
+        "fidelity",
+        "clock_id",
+        "started_monotonic_ns",
+        "ended_monotonic_ns",
+        "duration_ms",
+    }):
+        return False
+    timing = cast(Mapping[str, object], value)
+    fidelity = timing.get("fidelity")
+    clock_id = timing.get("clock_id")
+    started = timing.get("started_monotonic_ns")
+    ended = timing.get("ended_monotonic_ns")
+    duration = timing.get("duration_ms")
+    if not isinstance(fidelity, str) or fidelity not in _TIMING_FIDELITIES:
+        return False
+    if fidelity == "native_monotonic" and (
+        not isinstance(clock_id, str) or not 0 < len(clock_id) <= 256
+    ):
+        return False
+    if fidelity == "not_available" and len(timing) != 1:
+        return False
+    if started is not None and (
+        isinstance(started, bool) or not isinstance(started, int) or started < 0
+    ):
+        return False
+    if ended is not None and (
+        isinstance(ended, bool) or not isinstance(ended, int) or ended < 0
+    ):
+        return False
+    if duration is not None and (
+        isinstance(duration, bool)
+        or not isinstance(duration, int | float)
+        or not math.isfinite(duration)
+        or duration < 0
+    ):
+        return False
+    if started is not None and fidelity != "native_monotonic":
+        return False
+    if ended is not None and (
+        fidelity != "native_monotonic" or started is None or duration is None
+    ):
+        return False
+    if phase == "end" and fidelity != "not_available" and duration is None:
+        return False
+    return True
+
+
+def _valid_error(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, Mapping) or not set(value).issubset({
+        "code",
+        "message",
+        "artifact",
+    }):
+        return False
+    error = cast(Mapping[str, object], value)
+    code = error.get("code")
+    return bool(
+        isinstance(code, str)
+        and re.fullmatch(r"[a-z][a-z0-9._-]*", code)
+        and isinstance(error.get("message"), str)
+    )
+
+
+def _valid_relations(values: Sequence[object]) -> bool:
+    for value in values:
+        if not isinstance(value, Mapping):
+            return False
+        relation = cast(Mapping[str, object], value)
+        if (
+            set(relation) != {"type", "event_id"}
+            or not isinstance(relation.get("type"), str)
+            or relation.get("type") not in _RELATION_TYPES
+            or not _valid_identifier(relation.get("event_id"))
+        ):
+            return False
+    return True
+
+
 def _ensure_private_directory(path: Path) -> None:
     if path.is_symlink():
         raise TraceStorageError(f"Trace directory cannot be a symbolic link: {path}")
@@ -535,6 +767,16 @@ class TraceRecorder:
                 identity.instance_id,
             ))
             or identity.attempt < 1
+            or not all(
+                _valid_identifier(value)
+                for value in (
+                    identity.trace_id,
+                    identity.run_id,
+                    identity.instance_id,
+                )
+            )
+            or not _valid_slug(identity.benchmark)
+            or not _valid_slug(identity.framework)
         ):
             raise ValueError("Trace identity is incomplete")
         if self._redactor.sanitize(identity.event_fields()).matches:
@@ -743,17 +985,43 @@ class TraceRecorder:
                 )
                 return None
             candidate = event_id or f"event-{uuid4().hex}"
+            timestamp = occurred_at or utc_now()
+            error_artifact = (
+                error.get("artifact") if isinstance(error, Mapping) else None
+            )
             if candidate in self._event_ids:
                 self._dropped_events += 1
                 self.report_issue(
                     "event.duplicate_id", "A duplicate Hermes trace event was rejected"
                 )
                 return None
-            if (
-                not re.fullmatch(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+", event_type)
-                or phase not in {"start", "end", "instant"}
-                or (phase == "start" and status != "started")
-                or (phase == "instant" and status == "started")
+            if not _valid_event_contract_fields(
+                event_type=event_type,
+                event_family=event_family,
+                phase=phase,
+                status=status,
+                event_id=candidate,
+                span_id=span_id,
+                occurred_at=timestamp,
+                origin=origin,
+                timing=timing,
+                error=error,
+                relations=relations,
+                identifiers=(
+                    session_id,
+                    agent_id,
+                    parent_agent_id,
+                    turn_id,
+                    parent_span_id,
+                ),
+            ) or (
+                isinstance(error, Mapping)
+                and "artifact" in error
+                and (
+                    not isinstance(error_artifact, Mapping)
+                    or self._artifacts.get(str(error_artifact.get("path")))
+                    != error_artifact
+                )
             ):
                 self._dropped_events += 1
                 self.report_issue(
@@ -808,7 +1076,7 @@ class TraceRecorder:
                 **self.identity.event_fields(),
                 **identifiers,
                 "span_id": span_id,
-                "occurred_at": occurred_at or utc_now(),
+                "occurred_at": timestamp,
                 "recorded_at": utc_now(),
                 "event_type": event_type,
                 "event_family": event_family,
