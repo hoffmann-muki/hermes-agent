@@ -1283,11 +1283,6 @@ def write_run_index(
                 ),
                 "degraded",
             )
-            health = json.loads(
-                (attempt_dir / "health.json").read_text(encoding="utf-8")
-            )
-            if not isinstance(health, dict) or health.get("status") != "healthy":
-                status = "degraded"
             attempts.append({
                 "trace_id": manifest["trace_id"],
                 "instance_id": instance_id,

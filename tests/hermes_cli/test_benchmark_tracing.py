@@ -75,7 +75,12 @@ def test_generic_coordinator_supports_an_arbitrary_benchmark(tmp_path):
         evaluation_workers=1,
     )
     adapter.start_session("custom-session")
-    adapter.finish("completed", messages=[])
+    adapter._recorder.report_issue(
+        "trace.synthetic_warning",
+        "Synthetic observability warning",
+        severity="warning",
+    )
+    adapter.finish("failed", messages=[])
     custom_harness = _CustomHarness()
     harness: TraceHarnessAdapter = custom_harness
 
@@ -86,6 +91,7 @@ def test_generic_coordinator_supports_an_arbitrary_benchmark(tmp_path):
     assert document["benchmark"] == "custom-benchmark"
     assert document["framework"] == "hermes"
     assert document["selection"]["instance_ids"] == ["custom-instance"]
+    assert document["attempts"][0]["status"] == "failed"
 
 
 def test_error_level_trace_issue_marks_attempt_failed_and_partial(tmp_path):
