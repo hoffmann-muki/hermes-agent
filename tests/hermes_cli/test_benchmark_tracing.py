@@ -327,10 +327,35 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
         **child,
     )
     adapter.on_tool_progress(
+        "subagent.model_turn",
+        child_turn_id="child-turn-1",
+        api_call_count=1,
+        previous_tools=[],
+        **child,
+    )
+    adapter.on_tool_progress(
+        "subagent.model_turn_complete",
+        child_turn_id="child-turn-1",
+        duration_seconds=0.1,
+        boundary="tool_calls",
+        status="completed",
+        **child,
+    )
+    adapter.on_tool_progress(
         "subagent.tool",
         "search_files",
         "find symbol",
         {"query": "Widget", "path": "."},
+        child_tool_id="child-tool-1",
+        **child,
+    )
+    adapter.on_tool_progress(
+        "subagent.tool_complete",
+        "search_files",
+        child_tool_id="child-tool-1",
+        duration_seconds=0.05,
+        is_error=False,
+        result="src/widget.py:10:class Widget",
         **child,
     )
     adapter.on_tool_progress(
@@ -375,7 +400,11 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
     attempt_dir = Path(result.attempt_dir)
     events = _read_jsonl(attempt_dir / "events.jsonl")
     event_types = [event["event_type"] for event in events]
-    assert event_types[:3] == ["instance.start", "attempt.start", "harness.start"]
+    assert event_types[:3] == [
+        "instance.start",
+        "attempt.start",
+        "harness.startup_start",
+    ]
     assert events[1]["payload"]["agent_configuration"] == {
         "delegation_enabled": True,
         "coordination_mode": "framework_native",
@@ -391,18 +420,40 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
         "shell.end",
         "delegation.start",
         "delegation.end",
-        "search.observed",
+        "search.start",
+        "search.end",
         "model.stream_delta",
         "context.compaction",
         "model.response",
         "agent.session_end",
-        "harness.end",
+        "agent.execution_end",
+        "harness.shutdown_start",
+        "harness.shutdown_end",
         "attempt.end",
         "instance.end",
     } <= set(event_types)
     shell_end = next(event for event in events if event["event_type"] == "shell.end")
     assert shell_end["timing"]["duration_ms"] == 125
     assert _artifact(attempt_dir, shell_end) == "./a.py\n./b.py\n"
+    child_model_end = next(
+        event
+        for event in events
+        if event["event_type"] == "model.turn_end"
+        and event.get("agent_id") == "child-1"
+    )
+    assert child_model_end["timing"]["duration_ms"] == 100
+    assert child_model_end["payload"]["boundary"] == "tool_calls"
+    execution_end = next(
+        event for event in events if event["event_type"] == "agent.execution_end"
+    )
+    transcript_response = next(
+        event for event in events if event["event_type"] == "model.response"
+    )
+    session_end = next(
+        event for event in events if event["event_type"] == "agent.session_end"
+    )
+    assert transcript_response["occurred_at"] == execution_end["occurred_at"]
+    assert session_end["occurred_at"] == execution_end["occurred_at"]
     assert result.health == "healthy"
     assert result.complete is True
 

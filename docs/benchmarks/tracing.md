@@ -9,8 +9,11 @@ The integration has three independent layers:
   selection, discovers finalized attempts, verifies coverage, and writes the run
   index.
 - `HermesTraceAdapter` consumes Hermes-native callbacks for sessions, model
-  turns, tools, delegation, compaction, timing, outputs, and errors. It receives
-  benchmark identity as data and contains no benchmark-specific extraction.
+  turns, tools, delegation, compaction, timing, outputs, and errors. Native
+  child step and progress hooks expose atomic child model turns plus correlated
+  child tool inputs, complete sanitized results, and durations. The adapter
+  receives benchmark identity as data and contains no benchmark-specific
+  extraction.
 - A `TraceHarnessAdapter` reports execution topology owned by the harness.
   Direct SWE runners use `DirectTraceHarness`. Harbor-backed runners use
   `HarborTraceHarness`, which resolves Harbor task order and infrastructure
@@ -35,6 +38,13 @@ activity as the agent performs it. Use `--trace-dir <base-directory>` to
 override the base or `--no-trace` for an intentional untraced run. This is not
 post-hoc log extraction, and no collector command needs to run before, during,
 or after the benchmark.
+
+Every complete attempt has one coarse startup span, one detailed agent-execution
+span, and one coarse shutdown span. These generic envelopes account for the
+whole attempt without encoding benchmark-specific setup or teardown. Detailed
+execution preserves overlapping root and child lanes; it is not forced into a
+serial history. Native occurrence and recorder capture timestamps remain
+distinct.
 
 SWE runners print the exact trace-run path. Terminal-Bench persists it in the
 benchmark manifest and prints it at completion. The selected base remains a
@@ -66,6 +76,9 @@ uv run benchmark-trace compare <trace-run-a> <trace-run-b>
 The tool operates on the normalized contract rather than framework or benchmark
 names. It validates, inspects provenance and capability boundaries, aggregates
 activity and timing, checks comparison parity, and renders deterministic nested
-timelines. `--format json` provides machine-readable output. It never launches
-Hermes or collects a trace, and it does not inspect artifact contents or
-calculate token usage or cost.
+timelines. Summaries report detailed execution coverage, explicit unattributed
+gaps, concurrency, lanes, ordering inversions, and capture delay. Rendering
+defaults to source-time order; `--order capture` and `--order sequence` expose
+arrival and durable-journal order. `--format json` provides machine-readable
+output. It never launches Hermes or collects a trace, and it does not inspect
+artifact contents or calculate token usage or cost.

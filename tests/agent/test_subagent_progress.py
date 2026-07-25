@@ -144,6 +144,50 @@ class TestBuildChildProgressCallback:
         assert "tool_0" in summary_text
         assert "tool_4" in summary_text
 
+    def test_gateway_relays_correlated_child_tool_completion(self):
+        """A child result keeps the generated call identity and native timing."""
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent_cb = MagicMock()
+        parent.tool_progress_callback = parent_cb
+
+        cb = _build_child_progress_callback(0, "test goal", parent)
+        cb("tool.started", "web_search", "query", {"query": "Widget"})
+        cb(
+            "tool.completed",
+            "web_search",
+            duration=0.125,
+            is_error=False,
+            result="src/widget.py:10",
+        )
+
+        started, completed = parent_cb.call_args_list
+        assert started.args[0] == "subagent.tool"
+        assert completed.args[0] == "subagent.tool_complete"
+        assert completed.kwargs["child_tool_id"] == started.kwargs["child_tool_id"]
+        assert completed.kwargs["duration_seconds"] == 0.125
+        assert completed.kwargs["is_error"] is False
+        assert completed.kwargs["result"] == "src/widget.py:10"
+
+    def test_gateway_relays_child_model_turn_boundaries(self):
+        """The child step hook exposes inference as one correlated atomic span."""
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent_cb = MagicMock()
+        parent.tool_progress_callback = parent_cb
+
+        cb = _build_child_progress_callback(0, "test goal", parent)
+        cb._step_callback(1, [])
+        cb("tool.started", "web_search", "query", {"query": "Widget"})
+
+        model_start, model_end, tool_start = parent_cb.call_args_list
+        assert model_start.args[0] == "subagent.model_turn"
+        assert model_end.args[0] == "subagent.model_turn_complete"
+        assert model_end.kwargs["child_turn_id"] == model_start.kwargs["child_turn_id"]
+        assert model_end.kwargs["boundary"] == "tool_calls"
+        assert model_end.kwargs["duration_seconds"] >= 0
+        assert tool_start.args[0] == "subagent.tool"
+
     def test_thinking_relayed_to_gateway(self):
         """Thinking events are relayed as subagent.thinking events."""
         parent = MagicMock()
@@ -384,4 +428,3 @@ class TestBatchFlush:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

@@ -31,6 +31,7 @@ class _PendingSpan:
     agent_id: str | None = None
     parent_agent_id: str | None = None
     tool_name: str | None = None
+    parent_span_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,8 +63,8 @@ def hermes_capabilities(
         "agent.session": ("derived", "full", "derived"),
         "model.turn": ("derived", "partial", "derived"),
         "tool.invocation": ("captured", "partial", "not_available"),
-        "tool.result": ("captured", "partial", "not_available"),
-        "tool.timing": ("captured", "partial", "native_monotonic"),
+        "tool.result": ("captured", "full", "native_monotonic"),
+        "tool.timing": ("captured", "full", "native_monotonic"),
         "shell": ("captured", "partial", "native_monotonic"),
         "file": ("captured", "partial", "native_monotonic"),
         "search": ("captured", "partial", "native_monotonic"),
@@ -76,8 +77,9 @@ def hermes_capabilities(
     }
     limitations = {
         "model.turn": (
-            "Root turn timing is derived from step, tool, and conversation-return "
-            "boundaries; child model request boundaries are not forwarded.",
+            "Root and delegated-child turn timing is derived from native step, "
+            "tool, and conversation-return boundaries; exact provider bodies "
+            "are not exposed.",
             "Token and cost accounting are intentionally excluded.",
         ),
         "provider.exchange": (
@@ -89,29 +91,25 @@ def hermes_capabilities(
             "display-safe values relayed by Hermes.",
         ),
         "tool.result": (
-            "Root tool results are complete; Hermes relays only a bounded child "
-            "output-tail summary, not complete child tool results.",
+            "Root and delegated child tool results are retained after mandatory "
+            "credential and accounting-field sanitization.",
         ),
         "tool.timing": (
-            "Hermes exposes native root tool durations but not child tool "
-            "completion timing.",
+            "Hermes exposes native durations for root and delegated child tools.",
         ),
         "shell": (
-            "Root shell input, output, and duration are complete; child shell "
-            "completion details are not relayed.",
+            "Child shell arguments are display-sanitized by Hermes before relay.",
         ),
         "file": (
-            "Root file-tool input, output, and duration are complete; child file "
-            "completion details are not relayed.",
+            "Child file-tool arguments are display-sanitized by Hermes before relay.",
         ),
         "search": (
-            "Root search input, output, and duration are complete; child search "
-            "completion details are not relayed.",
+            "Child search arguments are display-sanitized by Hermes before relay.",
         ),
         "delegation": (
-            "Hermes forwards native child lifecycle, text, and tool-start events, "
-            "plus a bounded output tail, but not complete child tool results or "
-            "complete child model exchanges.",
+            "Hermes forwards native child lifecycle, text, tool inputs, tool "
+            "results, and tool durations; child model activity is represented as "
+            "atomic turns without provider request or response bodies.",
         ),
         "context.compaction": (
             "Hermes emits a completed compaction fact without a start boundary or "
@@ -193,16 +191,25 @@ class HermesTraceAdapter:
         self._lock = threading.RLock()
         self._observed: dict[str, set[str]] = defaultdict(set)
         self._tools: dict[str, _PendingSpan] = {}
+        self._child_tools: dict[str, _PendingSpan] = {}
+        self._child_models: dict[str, _PendingSpan] = {}
         self._tool_completions: dict[str, deque[_ToolCompletion]] = defaultdict(deque)
         self._subagents: dict[str, _PendingSpan] = {}
         self._model: _PendingSpan | None = None
         self._session: _PendingSpan | None = None
+        self._transcript_recorded = False
         self._finished: TraceFinalization | None = None
-        self._started_ns = time.monotonic_ns()
+        self._attempt_started_ns = time.monotonic_ns()
+        self._startup_started_ns = self._attempt_started_ns
+        self._execution_started_ns: int | None = None
+        self._execution_ended = False
+        self._shutdown_started_ns: int | None = None
         trace_id = recorder.identity.trace_id
         self._instance_span = f"instance-{trace_id}"
         self._attempt_span = f"attempt-{trace_id}"
-        self._harness_span = f"harness-{trace_id}"
+        self._startup_span = f"hermes-startup-{trace_id}"
+        self._execution_span = f"hermes-execution-{trace_id}"
+        self._shutdown_span = f"hermes-shutdown-{trace_id}"
         self._record_lifecycle("instance.start", "instance", self._instance_span, None)
         self._record_lifecycle(
             "attempt.start",
@@ -223,9 +230,12 @@ class HermesTraceAdapter:
             },
         )
         self._record_lifecycle(
-            "harness.start", "harness", self._harness_span, self._attempt_span
+            "harness.startup_start",
+            "harness",
+            self._startup_span,
+            self._attempt_span,
         )
-        self._observe("harness.lifecycle", "harness.start")
+        self._observe("harness.lifecycle", "harness.startup_start")
 
     @property
     def identity(self):
@@ -244,8 +254,44 @@ class HermesTraceAdapter:
             "event_callback": self.on_event,
         }
 
+    def start_execution(self, *, entered: bool = True) -> None:
+        """Transition from coarse worker setup into detailed agent work."""
+
+        with self._lock:
+            if self._execution_started_ns is not None:
+                return
+            boundary = time.monotonic_ns()
+            occurred_at = utc_now()
+            self._record(
+                event_type="harness.startup_end",
+                event_family="harness",
+                phase="end",
+                status="completed",
+                span_id=self._startup_span,
+                parent_span_id=self._attempt_span,
+                origin=_harness_origin(),
+                timing=_derived_duration(self._startup_started_ns, boundary),
+                payload={},
+                occurred_at=occurred_at,
+            )
+            self._observe("harness.lifecycle", "harness.startup_end")
+            self._execution_started_ns = boundary
+            self._record(
+                event_type="agent.execution_start",
+                event_family="agent",
+                phase="start",
+                status="started",
+                span_id=self._execution_span,
+                parent_span_id=self._attempt_span,
+                origin=_harness_origin(),
+                timing={"fidelity": "derived"},
+                payload={"entered": entered},
+                occurred_at=occurred_at,
+            )
+
     def start_session(self, session_id: str) -> None:
         with self._lock:
+            self.start_execution()
             if self._session is not None:
                 return
             started_ns = time.monotonic_ns()
@@ -256,7 +302,7 @@ class HermesTraceAdapter:
                 phase="start",
                 status="started",
                 span_id=span_id,
-                parent_span_id=self._harness_span,
+                parent_span_id=self._execution_span,
                 session_id=session_id,
                 origin=_derived_origin(),
                 timing={"fidelity": "derived"},
@@ -284,7 +330,7 @@ class HermesTraceAdapter:
                 phase="instant",
                 status="completed",
                 span_id=f"hermes-container-{self.identity.trace_id}",
-                parent_span_id=self._harness_span,
+                parent_span_id=self._lifecycle_parent,
                 origin=_harness_origin(),
                 timing={"fidelity": "not_available"},
                 payload=dict(metadata),
@@ -527,44 +573,21 @@ class HermesTraceAdapter:
                 )
                 return
             if native_type == "subagent.tool":
-                artifact = self._recorder.store_json_artifact(
-                    arguments or {}, role="tool.arguments"
+                self._subagent_tool_start(
+                    name,
+                    preview,
+                    arguments,
+                    metadata,
                 )
-                group = _classify_tool(name)[2]
-                observed_type = (
-                    f"{group}.observed" if group != "tool" else "tool.observed"
-                )
-                event_id = self._record(
-                    event_type=observed_type,
-                    event_family=group,
-                    phase="instant",
-                    status="unknown",
-                    span_id=f"hermes-child-tool-{self.identity.trace_id}-{time.monotonic_ns()}",
-                    parent_span_id=self._subagent_parent(metadata),
-                    session_id=_optional_string(metadata.get("child_session_id")),
-                    agent_id=_optional_string(metadata.get("subagent_id")),
-                    parent_agent_id=_optional_string(metadata.get("parent_id")),
-                    origin=_native_origin(native_type),
-                    timing={"fidelity": "not_available"},
-                    payload={
-                        "tool": {
-                            "name": name,
-                            "arguments": arguments or {},
-                        },
-                        "preview": str(preview or ""),
-                    },
-                    artifacts=(artifact,) if artifact else (),
-                )
-                if event_id is not None:
-                    self._observe("tool.invocation", observed_type)
-                    self._observe_tool_group(name, observed_type)
-                    self._native(
-                        f"hermes.{native_type}",
-                        _progress_payload(
-                            native_type, name, preview, arguments, metadata
-                        ),
-                        ((event_id, observed_type),),
-                    )
+                return
+            if native_type == "subagent.tool_complete":
+                self._subagent_tool_complete(name, metadata)
+                return
+            if native_type == "subagent.model_turn":
+                self._subagent_model_start(metadata)
+                return
+            if native_type == "subagent.model_turn_complete":
+                self._subagent_model_complete(metadata)
                 return
             self._instant_artifact_event(
                 "agent.progress",
@@ -606,10 +629,16 @@ class HermesTraceAdapter:
                 event_type,
             )
 
-    def record_transcript(self, messages: Any) -> None:
+    def record_transcript(
+        self,
+        messages: Any,
+        *,
+        occurred_at: str | None = None,
+    ) -> None:
         with self._lock:
-            if not isinstance(messages, list):
+            if self._transcript_recorded or not isinstance(messages, list):
                 return
+            self._transcript_recorded = True
             linked: list[tuple[str, str]] = []
             for index, message in enumerate(messages):
                 if (
@@ -641,6 +670,7 @@ class HermesTraceAdapter:
                         "has_tool_calls": bool(message.get("tool_calls")),
                     },
                     artifacts=(artifact,) if artifact else (),
+                    occurred_at=occurred_at,
                 )
                 if event_id is not None:
                     linked.append((event_id, "model.response"))
@@ -652,6 +682,124 @@ class HermesTraceAdapter:
                     tuple(linked),
                 )
 
+    def end_execution(
+        self,
+        status: TraceStatus,
+        *,
+        messages: Any = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Close detailed agent activity and begin coarse worker shutdown."""
+
+        with self._lock:
+            if self._execution_ended:
+                return
+            boundary = time.monotonic_ns()
+            occurred_at = utc_now()
+            self.record_transcript(messages, occurred_at=occurred_at)
+            if self._execution_started_ns is None:
+                self._record(
+                    event_type="harness.startup_end",
+                    event_family="harness",
+                    phase="end",
+                    status=status,
+                    span_id=self._startup_span,
+                    parent_span_id=self._attempt_span,
+                    origin=_harness_origin(),
+                    timing=_derived_duration(self._startup_started_ns, boundary),
+                    payload={},
+                    error=_lifecycle_error(status, error_message),
+                    occurred_at=occurred_at,
+                )
+                self._observe("harness.lifecycle", "harness.startup_end")
+                self._execution_started_ns = boundary
+                self._record(
+                    event_type="agent.execution_start",
+                    event_family="agent",
+                    phase="start",
+                    status="started",
+                    span_id=self._execution_span,
+                    parent_span_id=self._attempt_span,
+                    origin=_harness_origin(),
+                    timing={"fidelity": "derived"},
+                    payload={"entered": False},
+                    occurred_at=occurred_at,
+                )
+            if self._model is not None:
+                self._end_model(
+                    status,
+                    "conversation_return",
+                    ended_ns=boundary,
+                    occurred_at=occurred_at,
+                )
+            for tool_id, pending in tuple(self._tools.items()):
+                self._close_incomplete_tool(
+                    tool_id,
+                    pending,
+                    status,
+                    ended_ns=boundary,
+                    occurred_at=occurred_at,
+                )
+            for tool_id, pending in tuple(self._child_tools.items()):
+                self._close_incomplete_child_tool(
+                    tool_id,
+                    pending,
+                    status,
+                    ended_ns=boundary,
+                    occurred_at=occurred_at,
+                )
+            for turn_id, pending in tuple(self._child_models.items()):
+                self._close_incomplete_child_model(
+                    turn_id,
+                    pending,
+                    status,
+                    ended_ns=boundary,
+                    occurred_at=occurred_at,
+                )
+            for subagent_id, pending in tuple(self._subagents.items()):
+                self._close_incomplete_subagent(
+                    subagent_id,
+                    pending,
+                    status,
+                    ended_ns=boundary,
+                    occurred_at=occurred_at,
+                )
+            if self._session is not None:
+                self._end_session(
+                    status,
+                    ended_ns=boundary,
+                    occurred_at=occurred_at,
+                )
+            assert self._execution_started_ns is not None
+            self._record(
+                event_type="agent.execution_end",
+                event_family="agent",
+                phase="end",
+                status=status,
+                span_id=self._execution_span,
+                parent_span_id=self._attempt_span,
+                origin=_harness_origin(),
+                timing=_derived_duration(self._execution_started_ns, boundary),
+                payload={},
+                error=_lifecycle_error(status, error_message),
+                occurred_at=occurred_at,
+            )
+            self._execution_ended = True
+            self._shutdown_started_ns = boundary
+            self._record(
+                event_type="harness.shutdown_start",
+                event_family="harness",
+                phase="start",
+                status="started",
+                span_id=self._shutdown_span,
+                parent_span_id=self._attempt_span,
+                origin=_harness_origin(),
+                timing={"fidelity": "derived"},
+                payload={},
+                occurred_at=occurred_at,
+            )
+            self._observe("harness.lifecycle", "harness.shutdown_start")
+
     def finish(
         self,
         status: TraceStatus,
@@ -662,23 +810,22 @@ class HermesTraceAdapter:
         with self._lock:
             if self._finished is not None:
                 return self._finished
-            self.record_transcript(messages)
-            if self._model is not None:
-                self._end_model(status, "conversation_return")
-            for tool_id, pending in tuple(self._tools.items()):
-                self._close_incomplete_tool(tool_id, pending, status)
-            for subagent_id, pending in tuple(self._subagents.items()):
-                self._close_incomplete_subagent(subagent_id, pending, status)
-            if self._session is not None:
-                self._end_session(status)
+            self.end_execution(
+                status,
+                messages=messages,
+                error_message=error_message,
+            )
+            assert self._shutdown_started_ns is not None
             self._end_lifecycle(
-                "harness.end",
+                "harness.shutdown_end",
                 "harness",
-                self._harness_span,
+                self._shutdown_span,
                 self._attempt_span,
                 status,
+                error_message,
+                started_ns=self._shutdown_started_ns,
             )
-            self._observe("harness.lifecycle", "harness.end")
+            self._observe("harness.lifecycle", "harness.shutdown_end")
             self._end_lifecycle(
                 "attempt.end",
                 "attempt",
@@ -707,9 +854,24 @@ class HermesTraceAdapter:
 
     @property
     def _session_parent(self) -> str:
-        return self._session.span_id if self._session else self._harness_span
+        return self._session.span_id if self._session else self._execution_span
 
-    def _end_model(self, status: TraceStatus, reason: str) -> None:
+    @property
+    def _lifecycle_parent(self) -> str:
+        if self._execution_started_ns is None:
+            return self._startup_span
+        if not self._execution_ended:
+            return self._execution_span
+        return self._shutdown_span
+
+    def _end_model(
+        self,
+        status: TraceStatus,
+        reason: str,
+        *,
+        ended_ns: int | None = None,
+        occurred_at: str | None = None,
+    ) -> None:
         pending = self._model
         if pending is None:
             return
@@ -723,15 +885,22 @@ class HermesTraceAdapter:
             session_id=pending.session_id,
             agent_id=pending.agent_id,
             origin=_derived_origin(),
-            timing=_derived_duration(pending.started_ns),
+            timing=_derived_duration(pending.started_ns, ended_ns),
             payload={"boundary": reason},
             relations=({"type": "caused_by", "event_id": pending.start_event_id},),
+            occurred_at=occurred_at,
         )
         if event_id is not None:
             self._observe("model.turn", pending.end_type)
         self._model = None
 
-    def _end_session(self, status: TraceStatus) -> None:
+    def _end_session(
+        self,
+        status: TraceStatus,
+        *,
+        ended_ns: int | None = None,
+        occurred_at: str | None = None,
+    ) -> None:
         pending = self._session
         if pending is None:
             return
@@ -741,17 +910,300 @@ class HermesTraceAdapter:
             phase="end",
             status=status,
             span_id=pending.span_id,
-            parent_span_id=self._harness_span,
+            parent_span_id=self._execution_span,
             session_id=pending.session_id,
             agent_id=pending.agent_id,
             origin=_derived_origin(),
-            timing=_derived_duration(pending.started_ns),
+            timing=_derived_duration(pending.started_ns, ended_ns),
             payload={},
             relations=({"type": "caused_by", "event_id": pending.start_event_id},),
+            occurred_at=occurred_at,
         )
         if event_id is not None:
             self._observe("agent.session", pending.end_type)
         self._session = None
+
+    def _subagent_tool_start(
+        self,
+        tool_name: str,
+        preview: Any,
+        arguments: Any,
+        metadata: Mapping[str, Any],
+    ) -> None:
+        subagent_id = str(
+            metadata.get("subagent_id") or metadata.get("child_session_id") or ""
+        )
+        child_tool_id = str(
+            metadata.get("child_tool_id") or f"unknown-{time.monotonic_ns()}"
+        )
+        key = f"{subagent_id}:{child_tool_id}"
+        classification = _classify_tool(tool_name)
+        parent_span_id = self._subagent_parent(metadata)
+        artifact = self._recorder.store_json_artifact(
+            arguments or {},
+            role="tool.arguments",
+        )
+        started_ns = time.monotonic_ns()
+        span_id = (
+            f"hermes-child-tool-{self.identity.trace_id}-{subagent_id}-{child_tool_id}"
+        )
+        event_id = self._record(
+            event_type=classification[0],
+            event_family=classification[2],
+            phase="start",
+            status="started",
+            span_id=span_id,
+            parent_span_id=parent_span_id,
+            session_id=_optional_string(metadata.get("child_session_id")),
+            agent_id=_optional_string(metadata.get("subagent_id")),
+            parent_agent_id=_optional_string(metadata.get("parent_id")),
+            origin=_native_origin("subagent.tool"),
+            timing={
+                "fidelity": "native_monotonic",
+                "clock_id": "hermes.subagent_tool_duration",
+            },
+            payload={
+                "tool": {
+                    "name": tool_name,
+                    "call_id": child_tool_id,
+                    "arguments": arguments or {},
+                },
+                "preview": str(preview or ""),
+            },
+            artifacts=(artifact,) if artifact else (),
+        )
+        if event_id is None:
+            return
+        self._child_tools[key] = _PendingSpan(
+            span_id=span_id,
+            start_event_id=event_id,
+            start_type=classification[0],
+            end_type=classification[1],
+            family=classification[2],
+            started_ns=started_ns,
+            session_id=_optional_string(metadata.get("child_session_id")),
+            agent_id=_optional_string(metadata.get("subagent_id")),
+            parent_agent_id=_optional_string(metadata.get("parent_id")),
+            tool_name=tool_name,
+            parent_span_id=parent_span_id,
+        )
+        self._observe("tool.invocation", classification[0])
+        self._observe_tool_group(tool_name, classification[0])
+        self._native(
+            "hermes.subagent.tool",
+            _progress_payload(
+                "subagent.tool",
+                tool_name,
+                preview,
+                arguments,
+                metadata,
+            ),
+            ((event_id, classification[0]),),
+        )
+
+    def _subagent_tool_complete(
+        self,
+        tool_name: str,
+        metadata: Mapping[str, Any],
+    ) -> None:
+        subagent_id = str(
+            metadata.get("subagent_id") or metadata.get("child_session_id") or ""
+        )
+        child_tool_id = str(metadata.get("child_tool_id") or "")
+        pending = self._child_tools.pop(
+            f"{subagent_id}:{child_tool_id}",
+            None,
+        )
+        if pending is None:
+            self._recorder.report_issue(
+                "hermes.subagent_tool_completion_without_start",
+                "Hermes emitted a child tool completion without a matching start",
+            )
+            return
+        duration = metadata.get("duration_seconds")
+        duration_ms = (
+            max(0.0, float(duration) * 1000)
+            if isinstance(duration, (int, float))
+            else (time.monotonic_ns() - pending.started_ns) / 1_000_000
+        )
+        is_error = bool(metadata.get("is_error"))
+        result = metadata.get("result")
+        artifact = (
+            self._recorder.store_text_artifact(
+                result,
+                role="tool.error" if is_error else "tool.output",
+            )
+            if isinstance(result, str)
+            else self._recorder.store_json_artifact(
+                result,
+                role="tool.error" if is_error else "tool.output",
+            )
+        )
+        event_id = self._record(
+            event_type=pending.end_type,
+            event_family=pending.family,
+            phase="end",
+            status="failed" if is_error else "completed",
+            span_id=pending.span_id,
+            parent_span_id=pending.parent_span_id or self._session_parent,
+            session_id=pending.session_id,
+            agent_id=pending.agent_id,
+            parent_agent_id=pending.parent_agent_id,
+            origin=_native_origin("subagent.tool_complete"),
+            timing={
+                "fidelity": "native_monotonic",
+                "clock_id": "hermes.subagent_tool_duration",
+                "duration_ms": duration_ms,
+            },
+            payload={
+                "tool": {
+                    "name": tool_name,
+                    "call_id": child_tool_id,
+                }
+            },
+            artifacts=(artifact,) if artifact else (),
+            error=(
+                {
+                    "code": "hermes.subagent_tool_failed",
+                    "message": "Hermes reported a failed child tool invocation",
+                }
+                if is_error
+                else None
+            ),
+            relations=({"type": "caused_by", "event_id": pending.start_event_id},),
+        )
+        if event_id is None:
+            return
+        self._observe("tool.result", pending.end_type)
+        self._observe("tool.timing", pending.end_type)
+        self._observe_tool_group(tool_name, pending.end_type)
+        self._native(
+            "hermes.subagent.tool_complete",
+            _progress_payload(
+                "subagent.tool_complete",
+                tool_name,
+                None,
+                None,
+                metadata,
+            ),
+            ((event_id, pending.end_type),),
+        )
+
+    def _subagent_model_start(self, metadata: Mapping[str, Any]) -> None:
+        subagent_id = str(
+            metadata.get("subagent_id") or metadata.get("child_session_id") or ""
+        )
+        child_turn_id = str(
+            metadata.get("child_turn_id") or f"unknown-{time.monotonic_ns()}"
+        )
+        key = f"{subagent_id}:{child_turn_id}"
+        started_ns = time.monotonic_ns()
+        parent_span_id = self._subagent_parent(metadata)
+        span_id = (
+            f"hermes-child-model-{self.identity.trace_id}-{subagent_id}-{child_turn_id}"
+        )
+        event_id = self._record(
+            event_type="model.turn_start",
+            event_family="model",
+            phase="start",
+            status="started",
+            span_id=span_id,
+            parent_span_id=parent_span_id,
+            session_id=_optional_string(metadata.get("child_session_id")),
+            agent_id=_optional_string(metadata.get("subagent_id")),
+            parent_agent_id=_optional_string(metadata.get("parent_id")),
+            turn_id=child_turn_id,
+            origin=_native_origin("subagent.model_turn"),
+            timing={
+                "fidelity": "native_monotonic",
+                "clock_id": "hermes.subagent_model_duration",
+            },
+            payload={
+                "api_call_count": metadata.get("api_call_count"),
+                "boundary": "child_step_callback",
+            },
+        )
+        if event_id is None:
+            return
+        self._child_models[key] = _PendingSpan(
+            span_id=span_id,
+            start_event_id=event_id,
+            start_type="model.turn_start",
+            end_type="model.turn_end",
+            family="model",
+            started_ns=started_ns,
+            session_id=_optional_string(metadata.get("child_session_id")),
+            agent_id=_optional_string(metadata.get("subagent_id")),
+            parent_agent_id=_optional_string(metadata.get("parent_id")),
+            tool_name="model",
+            parent_span_id=parent_span_id,
+        )
+        self._observe("model.turn", "model.turn_start")
+        self._native(
+            "hermes.subagent.model_turn",
+            dict(metadata),
+            ((event_id, "model.turn_start"),),
+        )
+
+    def _subagent_model_complete(self, metadata: Mapping[str, Any]) -> None:
+        subagent_id = str(
+            metadata.get("subagent_id") or metadata.get("child_session_id") or ""
+        )
+        child_turn_id = str(metadata.get("child_turn_id") or "")
+        pending = self._child_models.pop(
+            f"{subagent_id}:{child_turn_id}",
+            None,
+        )
+        if pending is None:
+            self._recorder.report_issue(
+                "hermes.subagent_model_completion_without_start",
+                "Hermes emitted a child model completion without a matching start",
+            )
+            return
+        duration = metadata.get("duration_seconds")
+        duration_ms = (
+            max(0.0, float(duration) * 1000)
+            if isinstance(duration, (int, float))
+            else (time.monotonic_ns() - pending.started_ns) / 1_000_000
+        )
+        reported_status = str(metadata.get("status") or "completed")
+        status = _normalized_native_status(reported_status)
+        event_id = self._record(
+            event_type="model.turn_end",
+            event_family="model",
+            phase="end",
+            status=status,
+            span_id=pending.span_id,
+            parent_span_id=pending.parent_span_id or self._session_parent,
+            session_id=pending.session_id,
+            agent_id=pending.agent_id,
+            parent_agent_id=pending.parent_agent_id,
+            turn_id=child_turn_id,
+            origin=_native_origin("subagent.model_turn_complete"),
+            timing={
+                "fidelity": "native_monotonic",
+                "clock_id": "hermes.subagent_model_duration",
+                "duration_ms": duration_ms,
+            },
+            payload={"boundary": str(metadata.get("boundary") or "unknown")},
+            error=(
+                {
+                    "code": "hermes.subagent_model_failed",
+                    "message": "Hermes reported an unsuccessful child model turn",
+                }
+                if status != "completed"
+                else None
+            ),
+            relations=({"type": "caused_by", "event_id": pending.start_event_id},),
+        )
+        if event_id is None:
+            return
+        self._observe("model.turn", "model.turn_end")
+        self._native(
+            "hermes.subagent.model_turn_complete",
+            dict(metadata),
+            ((event_id, "model.turn_end"),),
+        )
 
     def _subagent_start(self, preview: Any, metadata: Mapping[str, Any]) -> None:
         subagent_id = str(
@@ -828,22 +1280,14 @@ class HermesTraceAdapter:
             str(preview or ""), role="delegation.result"
         )
         native_status = str(metadata.get("status") or "completed")
-        status = (
-            "completed"
-            if native_status in {"completed", "success"}
-            else "timeout"
-            if native_status == "timeout"
-            else "cancelled"
-            if native_status in {"cancelled", "interrupted"}
-            else "failed"
-        )
+        status = _normalized_native_status(native_status)
         event_id = self._record(
             event_type=pending.end_type,
             event_family=pending.family,
             phase="end",
             status=status,
             span_id=pending.span_id,
-            parent_span_id=self._session_parent,
+            parent_span_id=pending.parent_span_id or self._session_parent,
             session_id=pending.session_id,
             agent_id=pending.agent_id,
             parent_agent_id=pending.parent_agent_id,
@@ -924,7 +1368,13 @@ class HermesTraceAdapter:
             )
 
     def _close_incomplete_tool(
-        self, tool_id: str, pending: _PendingSpan, status: TraceStatus
+        self,
+        tool_id: str,
+        pending: _PendingSpan,
+        status: TraceStatus,
+        *,
+        ended_ns: int,
+        occurred_at: str,
     ) -> None:
         self._record(
             event_type=pending.end_type,
@@ -932,11 +1382,11 @@ class HermesTraceAdapter:
             phase="end",
             status=status,
             span_id=pending.span_id,
-            parent_span_id=self._session_parent,
+            parent_span_id=pending.parent_span_id or self._session_parent,
             session_id=pending.session_id,
             agent_id=pending.agent_id,
             origin=_derived_origin(),
-            timing=_derived_duration(pending.started_ns),
+            timing=_derived_duration(pending.started_ns, ended_ns),
             payload={
                 "tool": {
                     "name": pending.tool_name or "unknown",
@@ -945,11 +1395,18 @@ class HermesTraceAdapter:
                 "boundary": "adapter_finalization",
             },
             relations=({"type": "caused_by", "event_id": pending.start_event_id},),
+            occurred_at=occurred_at,
         )
         self._tools.pop(tool_id, None)
 
     def _close_incomplete_subagent(
-        self, subagent_id: str, pending: _PendingSpan, status: TraceStatus
+        self,
+        subagent_id: str,
+        pending: _PendingSpan,
+        status: TraceStatus,
+        *,
+        ended_ns: int,
+        occurred_at: str,
     ) -> None:
         self._record(
             event_type=pending.end_type,
@@ -957,16 +1414,78 @@ class HermesTraceAdapter:
             phase="end",
             status=status,
             span_id=pending.span_id,
-            parent_span_id=self._session_parent,
+            parent_span_id=pending.parent_span_id or self._session_parent,
             session_id=pending.session_id,
             agent_id=pending.agent_id,
             parent_agent_id=pending.parent_agent_id,
             origin=_derived_origin(),
-            timing=_derived_duration(pending.started_ns),
+            timing=_derived_duration(pending.started_ns, ended_ns),
             payload={"boundary": "adapter_finalization"},
             relations=({"type": "caused_by", "event_id": pending.start_event_id},),
+            occurred_at=occurred_at,
         )
         self._subagents.pop(subagent_id, None)
+
+    def _close_incomplete_child_tool(
+        self,
+        tool_id: str,
+        pending: _PendingSpan,
+        status: TraceStatus,
+        *,
+        ended_ns: int,
+        occurred_at: str,
+    ) -> None:
+        self._record(
+            event_type=pending.end_type,
+            event_family=pending.family,
+            phase="end",
+            status=status,
+            span_id=pending.span_id,
+            parent_span_id=pending.parent_span_id or self._session_parent,
+            session_id=pending.session_id,
+            agent_id=pending.agent_id,
+            parent_agent_id=pending.parent_agent_id,
+            origin=_derived_origin(),
+            timing=_derived_duration(pending.started_ns, ended_ns),
+            payload={
+                "tool": {
+                    "name": pending.tool_name or "unknown",
+                    "call_id": tool_id,
+                },
+                "boundary": "execution_finalization",
+            },
+            relations=({"type": "caused_by", "event_id": pending.start_event_id},),
+            occurred_at=occurred_at,
+        )
+        self._child_tools.pop(tool_id, None)
+
+    def _close_incomplete_child_model(
+        self,
+        turn_id: str,
+        pending: _PendingSpan,
+        status: TraceStatus,
+        *,
+        ended_ns: int,
+        occurred_at: str,
+    ) -> None:
+        self._record(
+            event_type=pending.end_type,
+            event_family=pending.family,
+            phase="end",
+            status=status,
+            span_id=pending.span_id,
+            parent_span_id=pending.parent_span_id or self._session_parent,
+            session_id=pending.session_id,
+            agent_id=pending.agent_id,
+            parent_agent_id=pending.parent_agent_id,
+            turn_id=turn_id.rsplit(":", 1)[-1],
+            origin=_derived_origin(),
+            timing=_derived_duration(pending.started_ns, ended_ns),
+            payload={"boundary": "execution_finalization"},
+            relations=({"type": "caused_by", "event_id": pending.start_event_id},),
+            occurred_at=occurred_at,
+        )
+        self._child_models.pop(turn_id, None)
 
     def _record_lifecycle(
         self,
@@ -996,6 +1515,8 @@ class HermesTraceAdapter:
         parent_span_id: str | None,
         status: TraceStatus,
         error_message: str | None = None,
+        *,
+        started_ns: int | None = None,
     ) -> None:
         self._record(
             event_type=event_type,
@@ -1005,17 +1526,9 @@ class HermesTraceAdapter:
             span_id=span_id,
             parent_span_id=parent_span_id,
             origin=_harness_origin(),
-            timing=_derived_duration(self._started_ns),
+            timing=_derived_duration(started_ns or self._attempt_started_ns),
             payload={},
-            error=(
-                {
-                    "code": "hermes.attempt_failed",
-                    "message": error_message
-                    or "Hermes benchmark attempt did not complete",
-                }
-                if status != "completed"
-                else None
-            ),
+            error=_lifecycle_error(status, error_message),
         )
 
     def _native(
@@ -1113,11 +1626,41 @@ def _harness_origin() -> JsonObject:
     }
 
 
-def _derived_duration(started_ns: int) -> JsonObject:
+def _derived_duration(
+    started_ns: int,
+    ended_ns: int | None = None,
+) -> JsonObject:
     return {
         "fidelity": "derived",
-        "duration_ms": max(0.0, (time.monotonic_ns() - started_ns) / 1_000_000),
+        "duration_ms": max(
+            0.0,
+            ((ended_ns or time.monotonic_ns()) - started_ns) / 1_000_000,
+        ),
     }
+
+
+def _lifecycle_error(
+    status: TraceStatus,
+    error_message: str | None,
+) -> JsonObject | None:
+    if status == "completed":
+        return None
+    return {
+        "code": "hermes.attempt_failed",
+        "message": error_message or "Hermes benchmark attempt did not complete",
+    }
+
+
+def _normalized_native_status(status: str) -> TraceStatus:
+    if status in {"completed", "success"}:
+        return "completed"
+    if status == "timeout":
+        return "timeout"
+    if status in {"cancelled", "interrupted"}:
+        return "cancelled"
+    if status == "degraded":
+        return "degraded"
+    return "failed"
 
 
 def _optional_string(value: Any) -> str | None:

@@ -523,6 +523,20 @@ def run_worker(
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     finally:
+        if trace_adapter is not None:
+            trace_adapter.end_execution(
+                (
+                    "timeout"
+                    if termination_requested.is_set()
+                    else "completed"
+                    if coordinator_result.get("completed")
+                    and not coordinator_result.get("interrupted")
+                    and error is None
+                    else "failed"
+                ),
+                messages=coordinator_result.get("messages"),
+                error_message=error,
+            )
         timed_out = termination_requested.is_set()
         if runtime_metadata is not None and not timed_out:
             runtime_metadata["agentCompletedAt"] = utc_now()

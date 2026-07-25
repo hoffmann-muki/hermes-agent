@@ -865,6 +865,10 @@ def _build_child_progress_callback(
     _BATCH_SIZE = 5
     _batch: List[str] = []
     _tool_count = [0]  # per-subagent running counter (list for closure mutation)
+    _tool_sequence = [0]
+    _pending_tools: Dict[str, List[str]] = {}
+    _model_sequence = [0]
+    _pending_model: List[tuple[str, float]] = []
 
     def _identity_kwargs() -> Dict[str, Any]:
         kw: Dict[str, Any] = {
@@ -902,6 +906,30 @@ def _build_child_progress_callback(
         except Exception as e:
             logger.debug("Parent callback failed: %s", e)
 
+    def _end_model_turn(boundary: str, status: str = "completed") -> None:
+        if not _pending_model:
+            return
+        child_turn_id, started_at = _pending_model.pop()
+        _relay(
+            "subagent.model_turn_complete",
+            child_turn_id=child_turn_id,
+            duration_seconds=max(0.0, time.monotonic() - started_at),
+            boundary=boundary,
+            status=status,
+        )
+
+    def _step_callback(api_call_count: int, previous_tools: Any) -> None:
+        _end_model_turn("next_model_turn")
+        _model_sequence[0] += 1
+        child_turn_id = f"child-turn-{_model_sequence[0]}"
+        _pending_model.append((child_turn_id, time.monotonic()))
+        _relay(
+            "subagent.model_turn",
+            child_turn_id=child_turn_id,
+            api_call_count=api_call_count,
+            previous_tools=previous_tools,
+        )
+
     def _callback(
         event_type, tool_name: str = None, preview: str = None, args=None, **kwargs
     ):
@@ -920,6 +948,10 @@ def _build_child_progress_callback(
             return
 
         if event_type == "subagent.complete":
+            _end_model_turn(
+                "subagent_complete",
+                str(kwargs.get("status") or "completed"),
+            )
             _relay("subagent.complete", preview=preview, **kwargs)
             return
 
@@ -958,6 +990,20 @@ def _build_child_progress_callback(
             return
 
         if event == DelegateEvent.TASK_TOOL_COMPLETED:
+            pending = _pending_tools.get(tool_name or "", [])
+            child_tool_id = pending.pop(0) if pending else None
+            if not pending:
+                _pending_tools.pop(tool_name or "", None)
+            _relay(
+                "subagent.tool_complete",
+                tool_name,
+                preview,
+                args,
+                child_tool_id=child_tool_id,
+                duration_seconds=kwargs.get("duration"),
+                is_error=bool(kwargs.get("is_error")),
+                result=kwargs.get("result"),
+            )
             return
 
         if event == DelegateEvent.TASK_PROGRESS:
@@ -982,6 +1028,7 @@ def _build_child_progress_callback(
             return
 
         # TASK_TOOL_STARTED — display and batch for parent relay
+        _end_model_turn("tool_calls")
         _tool_count[0] += 1
         if subagent_id is not None:
             with _active_subagents_lock:
@@ -1007,7 +1054,16 @@ def _build_child_progress_callback(
                 logger.debug("Spinner print_above failed: %s", e)
 
         if parent_cb:
-            _relay("subagent.tool", tool_name, preview, args)
+            _tool_sequence[0] += 1
+            child_tool_id = f"child-tool-{_tool_sequence[0]}"
+            _pending_tools.setdefault(tool_name or "", []).append(child_tool_id)
+            _relay(
+                "subagent.tool",
+                tool_name,
+                preview,
+                args,
+                child_tool_id=child_tool_id,
+            )
             _batch.append(tool_name or "")
             if len(_batch) >= _BATCH_SIZE:
                 summary = ", ".join(_batch)
@@ -1022,6 +1078,7 @@ def _build_child_progress_callback(
             _batch.clear()
 
     _callback._flush = _flush
+    _callback._step_callback = _step_callback
     return _callback
 
 
@@ -1220,6 +1277,11 @@ def _build_child_agent(
         toolsets=child_toolsets,
         session_ref=child_session_ref,
     )
+    child_step_cb = (
+        getattr(child_progress_cb, "_step_callback", None)
+        if child_progress_cb is not None
+        else None
+    )
 
     # Each subagent gets its own iteration budget capped at max_iterations
     # (configurable via delegation.max_iterations, default 50).  This means
@@ -1384,6 +1446,7 @@ def _build_child_agent(
         skip_memory=True,
         clarify_callback=None,
         thinking_callback=child_thinking_cb,
+        step_callback=child_step_cb,
         session_db=getattr(parent_agent, "_session_db", None),
         parent_session_id=getattr(parent_agent, "session_id", None),
         providers_allowed=child_providers_allowed,

@@ -331,6 +331,9 @@ def test_trace_completion_is_independent_of_delegation_audit(
         def start_session(self, _session_id):
             return None
 
+        def end_execution(self, _status, **_kwargs):
+            return None
+
         def finish(self, status, **_kwargs):
             statuses.append(status)
             return SimpleNamespace(

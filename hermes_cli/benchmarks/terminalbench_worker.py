@@ -315,6 +315,18 @@ def run_worker(
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     finally:
+        if trace_adapter is not None:
+            trace_adapter.end_execution(
+                (
+                    "completed"
+                    if coordinator_result.get("completed")
+                    and not coordinator_result.get("interrupted")
+                    and error is None
+                    else "failed"
+                ),
+                messages=coordinator_result.get("messages"),
+                error_message=error,
+            )
         if coordinator is not None:
             coordinator.release_clients()
 
