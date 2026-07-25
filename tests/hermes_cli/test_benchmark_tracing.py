@@ -31,7 +31,15 @@ from hermes_cli.benchmarks.tracing.harbor import (
     promote_harbor_trace_attempt,
     trace_instance_ids_from_job,
 )
-from hermes_cli.benchmarks.tracing.runtime import NATIVE_CHUNK_MEDIA_TYPE
+from hermes_cli.benchmarks.tracing.execution_tree import (
+    build_execution_tree,
+    execution_tree_event_ids,
+)
+from hermes_cli.benchmarks.tracing.runtime import (
+    NATIVE_CHUNK_MEDIA_TYPE,
+    SCHEMA_DIGEST,
+    TraceIdentity,
+)
 
 
 INSTANCE = "owner__repo-1"
@@ -59,6 +67,38 @@ class _CustomHarness:
         )
 
 
+def _projection_event(
+    sequence,
+    event_type,
+    phase,
+    status,
+    span_id,
+    timestamp_ms,
+    parent_span_id=None,
+    payload=None,
+):
+    timestamp = f"2026-01-01T00:00:00.{timestamp_ms:03d}Z"
+    return {
+        "event_id": f"event-{sequence:03d}",
+        "sequence": sequence,
+        "span_id": span_id,
+        **({"parent_span_id": parent_span_id} if parent_span_id else {}),
+        "occurred_at": timestamp,
+        "recorded_at": timestamp,
+        "event_type": event_type,
+        "event_family": event_type.split(".", 1)[0],
+        "phase": phase,
+        "status": status,
+        "origin": {"component": "test-agent", "capture_method": "derived"},
+        "timing": {
+            "fidelity": "derived",
+            **({"duration_ms": timestamp_ms} if phase == "end" else {}),
+        },
+        "payload": payload or {},
+        "artifacts": [],
+    }
+
+
 def test_generic_coordinator_supports_an_arbitrary_benchmark(tmp_path):
     run = create_trace_run(
         tmp_path / "traces",
@@ -80,7 +120,18 @@ def test_generic_coordinator_supports_an_arbitrary_benchmark(tmp_path):
         "Synthetic observability warning",
         severity="warning",
     )
-    adapter.finish("failed", messages=[])
+    result = adapter.finish("failed", messages=[])
+    execution_tree = json.loads(
+        (Path(result.attempt_dir) / "execution-tree.json").read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (Path(result.attempt_dir) / "manifest.json").read_text(encoding="utf-8")
+    )
+    events = (
+        (Path(result.attempt_dir) / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
     custom_harness = _CustomHarness()
     harness: TraceHarnessAdapter = custom_harness
 
@@ -92,6 +143,10 @@ def test_generic_coordinator_supports_an_arbitrary_benchmark(tmp_path):
     assert document["framework"] == "hermes"
     assert document["selection"]["instance_ids"] == ["custom-instance"]
     assert document["attempts"][0]["status"] == "failed"
+    assert execution_tree["complete"] is True
+    assert execution_tree["source"]["event_count"] == len(events)
+    assert execution_tree["source"]["represented_event_count"] == len(events)
+    assert manifest["files"]["execution_tree"] == "execution-tree.json"
 
 
 def test_error_level_trace_issue_marks_attempt_failed_and_partial(tmp_path):
@@ -117,6 +172,130 @@ def test_error_level_trace_issue_marks_attempt_failed_and_partial(tmp_path):
     assert result.complete is False
     assert health["status"] == "failed"
     assert health["finalization"] == "partial"
+
+
+def test_execution_tree_pairs_spans_and_marks_concurrent_siblings():
+    events = [
+        _projection_event(1, "attempt.start", "start", "started", "attempt", 0),
+        _projection_event(
+            2,
+            "model.turn_start",
+            "start",
+            "started",
+            "model-a",
+            100,
+            "attempt",
+            {"request": "first"},
+        ),
+        _projection_event(
+            3,
+            "model.turn_start",
+            "start",
+            "started",
+            "model-b",
+            150,
+            "attempt",
+            {"request": "second"},
+        ),
+        _projection_event(
+            4,
+            "model.turn_end",
+            "end",
+            "completed",
+            "model-b",
+            250,
+            "attempt",
+            {"response": "second"},
+        ),
+        _projection_event(
+            5,
+            "model.turn_end",
+            "end",
+            "completed",
+            "model-a",
+            300,
+            "attempt",
+            {"response": "first"},
+        ),
+        _projection_event(
+            6,
+            "context.compaction",
+            "instant",
+            "completed",
+            "compaction",
+            400,
+            "attempt",
+        ),
+        _projection_event(7, "attempt.end", "end", "completed", "attempt", 500),
+    ]
+    content = b"".join(
+        json.dumps(event, separators=(",", ":")).encode() + b"\n" for event in events
+    )
+
+    tree = build_execution_tree(
+        events,
+        identity=TraceIdentity(
+            trace_id="trace-tree",
+            run_id="run-tree",
+            benchmark="custom-benchmark",
+            framework="hermes",
+            instance_id="instance-1",
+            attempt=1,
+        ),
+        schema_digest=SCHEMA_DIGEST,
+        events_content=content,
+    )
+    attempt = tree["root"]["children"][0]
+    first, second = attempt["children"][:2]
+
+    assert tree["complete"] is True
+    assert first["source_event_ids"] == ["event-002", "event-005"]
+    assert first["input"] == {
+        "payload": {"request": "first"},
+        "artifacts": [],
+    }
+    assert first["output"] == {
+        "payload": {"response": "first"},
+        "artifacts": [],
+    }
+    assert first["concurrency_group"] == second["concurrency_group"]
+    assert first["overlaps_with"] == [second["node_id"]]
+    assert second["overlaps_with"] == [first["node_id"]]
+    assert sorted(execution_tree_event_ids(tree)) == sorted(
+        event["event_id"] for event in events
+    )
+
+
+def test_execution_tree_represents_an_empty_recovered_journal():
+    tree = build_execution_tree(
+        [],
+        identity=TraceIdentity(
+            trace_id="trace-empty-tree",
+            run_id="run-empty-tree",
+            benchmark="custom-benchmark",
+            framework="hermes",
+            instance_id="instance-empty",
+            attempt=1,
+        ),
+        schema_digest=SCHEMA_DIGEST,
+        events_content=b"",
+        generated_at="2026-01-01T00:00:00.000Z",
+    )
+
+    assert tree["complete"] is True
+    assert tree["source"] == {
+        "path": "events.jsonl",
+        "sha256": ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "event_count": 0,
+        "represented_event_count": 0,
+    }
+    assert tree["root"] == {
+        "node_id": "trace-root",
+        "started_at": None,
+        "ended_at": None,
+        "duration_ms": 0.0,
+        "children": [],
+    }
 
 
 def test_invalid_native_identifier_is_rejected_before_persistence(tmp_path):

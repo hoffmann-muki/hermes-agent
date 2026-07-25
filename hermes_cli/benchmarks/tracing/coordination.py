@@ -162,6 +162,7 @@ def finalize_trace_run(run: TraceRun, harness: TraceHarnessAdapter) -> Path:
             or not isinstance(attempt, int)
             or attempt < 1
             or not (manifest_path.parent / "events.jsonl").is_file()
+            or not (manifest_path.parent / "execution-tree.json").is_file()
             or not (manifest_path.parent / "health.json").is_file()
         ):
             raise ValueError(

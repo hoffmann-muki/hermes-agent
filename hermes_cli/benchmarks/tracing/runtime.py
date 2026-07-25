@@ -18,10 +18,12 @@ from typing import Any, Callable, Literal, Mapping, Sequence, cast
 from urllib.parse import quote
 from uuid import uuid4
 
+from hermes_cli.benchmarks.tracing.execution_tree import build_execution_tree
+
 
 SCHEMA_VERSION = "benchmark-trace/v1"
-CONTRACT_VERSION = "1.1.0"
-SCHEMA_DIGEST = "12121cb7fbdb81b1637954eefab17b1faaf39ecdff1ed4fe0d67065941ca4b17"
+CONTRACT_VERSION = "1.2.0"
+SCHEMA_DIGEST = "c54f3134f6d71167a7af3647f729a706dc5677edac914b89860a2a50c1d32d9a"
 NATIVE_CHUNK_MEDIA_TYPE = "application/vnd.benchmark-trace.native-records+jsonl+gzip"
 NATIVE_JOURNAL_FORMAT = "benchmark-trace/native-journal-v1"
 NATIVE_CHUNK_TARGET_BYTES = 1024 * 1024
@@ -1215,17 +1217,31 @@ class TraceRecorder:
                 content = journal.read_bytes()
                 if content and not content.endswith(b"\n"):
                     raise TraceStorageError("Hermes trace journal has a torn record")
+                finalized_at = utc_now()
                 _atomic_write(self.attempt_dir / "events.jsonl", content)
                 _replace_with_hard_link(
                     self.attempt_dir / "events.jsonl",
                     journal,
+                )
+                events = [json.loads(line) for line in content.splitlines()]
+                if not all(isinstance(event, dict) for event in events):
+                    raise TraceStorageError("Hermes event journal is invalid")
+                execution_tree = build_execution_tree(
+                    events,
+                    identity=self.identity,
+                    schema_digest=SCHEMA_DIGEST,
+                    events_content=content,
+                    generated_at=finalized_at,
+                )
+                _atomic_write(
+                    self.attempt_dir / "execution-tree.json",
+                    canonical_json(execution_tree),
                 )
                 native_index = self._pack_native_journal()
                 _atomic_write(
                     self.attempt_dir / "native" / "index.jsonl",
                     b"".join(canonical_json(record) for record in native_index),
                 )
-                finalized_at = utc_now()
                 failed = any(
                     issue.get("severity") == "error" for issue in self._issues.values()
                 )
@@ -1279,6 +1295,7 @@ class TraceRecorder:
                     "files": {
                         "journal": "journal.jsonl",
                         "events": "events.jsonl",
+                        "execution_tree": "execution-tree.json",
                         "capabilities": "capabilities.json",
                         "health": "health.json",
                         "native_index": "native/index.jsonl",
