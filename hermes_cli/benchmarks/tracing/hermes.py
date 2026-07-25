@@ -68,7 +68,7 @@ def hermes_capabilities(
         "shell": ("captured", "partial", "native_monotonic"),
         "file": ("captured", "partial", "native_monotonic"),
         "search": ("captured", "partial", "native_monotonic"),
-        "delegation": ("captured", "partial", "native_monotonic"),
+        "delegation": ("captured", "full", "native_monotonic"),
         "context.compaction": ("captured", "metadata_only", "not_available"),
         "harness.lifecycle": ("derived", "full", "derived"),
         "container.lifecycle": ("captured", "metadata_only", "not_available"),
@@ -195,6 +195,7 @@ class HermesTraceAdapter:
         self._child_models: dict[str, _PendingSpan] = {}
         self._tool_completions: dict[str, deque[_ToolCompletion]] = defaultdict(deque)
         self._subagents: dict[str, _PendingSpan] = {}
+        self._delegation_parents: dict[str, deque[str]] = defaultdict(deque)
         self._model: _PendingSpan | None = None
         self._session: _PendingSpan | None = None
         self._transcript_recorded = False
@@ -426,6 +427,10 @@ class HermesTraceAdapter:
                 agent_id="coordinator",
                 tool_name=tool_name,
             )
+            if classification[2] == "delegation" and isinstance(arguments, Mapping):
+                goal = arguments.get("goal")
+                if isinstance(goal, str):
+                    self._delegation_parents[goal].append(span_id)
             self._observe("tool.invocation", classification[0])
             self._observe_tool_group(tool_name, classification[0])
             self._native(
@@ -1211,18 +1216,34 @@ class HermesTraceAdapter:
             or metadata.get("child_session_id")
             or f"unknown-{time.monotonic_ns()}"
         )
-        span_id = f"hermes-delegation-{subagent_id}"
+        span_id = f"hermes-child-session-{subagent_id}"
+        goal = str(metadata.get("goal") or preview or "")
+        matching_parents = self._delegation_parents.get(goal)
+        parent_span_id = (
+            matching_parents.popleft()
+            if matching_parents
+            else next(
+                (
+                    pending.span_id
+                    for pending in reversed(tuple(self._tools.values()))
+                    if pending.family == "delegation"
+                ),
+                self._session_parent,
+            )
+        )
+        if matching_parents is not None and not matching_parents:
+            self._delegation_parents.pop(goal, None)
         artifact = self._recorder.store_json_artifact(
             _progress_payload("subagent.start", "", preview, None, metadata),
-            role="delegation.request",
+            role="agent.session.input",
         )
         event_id = self._record(
-            event_type="delegation.start",
-            event_family="delegation",
+            event_type="agent.session_start",
+            event_family="agent",
             phase="start",
             status="started",
             span_id=span_id,
-            parent_span_id=self._session_parent,
+            parent_span_id=parent_span_id,
             session_id=_optional_string(metadata.get("child_session_id")),
             agent_id=subagent_id,
             parent_agent_id=_optional_string(metadata.get("parent_id")),
@@ -1244,19 +1265,20 @@ class HermesTraceAdapter:
         self._subagents[subagent_id] = _PendingSpan(
             span_id=span_id,
             start_event_id=event_id,
-            start_type="delegation.start",
-            end_type="delegation.end",
-            family="delegation",
+            start_type="agent.session_start",
+            end_type="agent.session_end",
+            family="agent",
             started_ns=time.monotonic_ns(),
             session_id=_optional_string(metadata.get("child_session_id")),
             agent_id=subagent_id,
             parent_agent_id=_optional_string(metadata.get("parent_id")),
+            parent_span_id=parent_span_id,
         )
-        self._observe("delegation", "delegation.start")
+        self._observe("agent.session", "agent.session_start")
         self._native(
             "hermes.subagent.start",
             _progress_payload("subagent.start", "", preview, None, metadata),
-            ((event_id, "delegation.start"),),
+            ((event_id, "agent.session_start"),),
         )
 
     def _subagent_complete(self, preview: Any, metadata: Mapping[str, Any]) -> None:
@@ -1277,7 +1299,7 @@ class HermesTraceAdapter:
             else (time.monotonic_ns() - pending.started_ns) / 1_000_000
         )
         artifact = self._recorder.store_text_artifact(
-            str(preview or ""), role="delegation.result"
+            str(preview or ""), role="agent.session.output"
         )
         native_status = str(metadata.get("status") or "completed")
         status = _normalized_native_status(native_status)
@@ -1306,7 +1328,7 @@ class HermesTraceAdapter:
         )
         if event_id is None:
             return
-        self._observe("delegation", pending.end_type)
+        self._observe("agent.session", pending.end_type)
         self._native(
             "hermes.subagent.complete",
             _progress_payload("subagent.complete", "", preview, None, metadata),

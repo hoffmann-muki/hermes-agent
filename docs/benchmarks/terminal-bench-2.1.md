@@ -106,8 +106,10 @@ untraced run. A traced run requires the exact clean checkout selected by
 `--hermes-commit` and creates a private `trace-run-<uuid>` only after Harbor and
 Docker preflight. The worker attaches the Hermes-native callback adapter to the
 coordinator without replacing `delegate_task`, recording timestamped session,
-model, tool, shell, file, search, native child-delegation, and compaction
-activity.
+model, tool, shell, file, search, logical delegation, nested child-session, and
+compaction activity. Each parent `delegate_task` invocation is one delegation
+span; its native child lifecycle is represented as an agent session beneath
+that span rather than as a second delegation.
 
 The trace also records Harbor's resolved task identity, effective agent timeout,
 and container image. Concurrent trials receive locked per-instance attempt

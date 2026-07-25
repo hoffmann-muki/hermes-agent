@@ -12,8 +12,9 @@ The integration has three independent layers:
   turns, tools, delegation, compaction, timing, outputs, and errors. Native
   child step and progress hooks expose atomic child model turns plus correlated
   child tool inputs, complete sanitized results, and durations. The adapter
-  receives benchmark identity as data and contains no benchmark-specific
-  extraction.
+  represents each parent `delegate_task` call as one logical delegation and
+  nests the native child session beneath it. It receives benchmark identity as
+  data and contains no benchmark-specific extraction.
 - A `TraceHarnessAdapter` reports execution topology owned by the harness.
   Direct SWE runners use `DirectTraceHarness`. Harbor-backed runners use
   `HarborTraceHarness`, which resolves Harbor task order and infrastructure

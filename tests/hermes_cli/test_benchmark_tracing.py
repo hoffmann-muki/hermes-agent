@@ -321,6 +321,14 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
         "toolsets": ["terminal", "file"],
         "depth": 1,
     }
+    adapter.on_tool_start(
+        "delegate-1",
+        "delegate_task",
+        {
+            "goal": child["goal"],
+            "agent": "benchmark-navigator",
+        },
+    )
     adapter.on_tool_progress(
         "subagent.start",
         preview=child["goal"],
@@ -371,6 +379,22 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
         tool_count=1,
         cost_usd=1.25,
         **child,
+    )
+    adapter.on_tool_progress(
+        "tool.completed",
+        "delegate_task",
+        duration=0.25,
+        is_error=False,
+        result="Navigator report",
+    )
+    adapter.on_tool_complete(
+        "delegate-1",
+        "delegate_task",
+        {
+            "goal": child["goal"],
+            "agent": "benchmark-navigator",
+        },
+        "Navigator report",
     )
     adapter.on_event(
         "session:compress",
@@ -432,6 +456,20 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
         "attempt.end",
         "instance.end",
     } <= set(event_types)
+    assert event_types.count("delegation.start") == 1
+    assert event_types.count("delegation.end") == 1
+    child_session_start = next(
+        event
+        for event in events
+        if event["event_type"] == "agent.session_start"
+        and event.get("agent_id") == "child-1"
+    )
+    assert (
+        child_session_start["parent_span_id"]
+        == next(event for event in events if event["event_type"] == "delegation.start")[
+            "span_id"
+        ]
+    )
     shell_end = next(event for event in events if event["event_type"] == "shell.end")
     assert shell_end["timing"]["duration_ms"] == 125
     assert _artifact(attempt_dir, shell_end) == "./a.py\n./b.py\n"
@@ -450,7 +488,10 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
         event for event in events if event["event_type"] == "model.response"
     )
     session_end = next(
-        event for event in events if event["event_type"] == "agent.session_end"
+        event
+        for event in events
+        if event["event_type"] == "agent.session_end"
+        and event.get("agent_id") == "coordinator"
     )
     assert transcript_response["occurred_at"] == execution_end["occurred_at"]
     assert session_end["occurred_at"] == execution_end["occurred_at"]
@@ -461,9 +502,13 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
         (attempt_dir / "capabilities.json").read_text(encoding="utf-8")
     )
     states = {item["category"]: item["state"] for item in capabilities["capabilities"]}
+    coverage = {
+        item["category"]: item["coverage"] for item in capabilities["capabilities"]
+    }
     assert states["tool.result"] == "captured"
     assert states["tool.timing"] == "captured"
     assert states["delegation"] == "captured"
+    assert coverage["delegation"] == "full"
     assert states["context.compaction"] == "captured"
     assert states["provider.exchange"] == "not_exposed"
     assert states["memory"] == "disabled"

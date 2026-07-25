@@ -109,15 +109,15 @@ retry.
 
 The adapter uses Hermes' native agent callbacks. It retains sanitized native
 evidence and records root model-turn boundaries, complete root tool arguments
-and results, native tool durations, shell/file/search actions, native
-delegation lifecycle and child text/tool-start signals, and completed context
-compaction facts. Hermes forwards only a bounded child output-tail summary,
-rather than complete child tool results, and does not expose complete child
-model exchanges or a compaction start time through these callbacks. Those limits
-are explicit in `capabilities.json`. Memory and browser tools are disabled by
-this benchmark. Provider bodies, credentials, token usage, and cost accounting
-are not retained. Controller-owned final patch capture and container teardown
-remain outside the worker adapter boundary.
+and results, native tool durations, shell/file/search actions, logical
+delegation spans, nested child sessions, atomic child model turns, child tool
+inputs, complete sanitized results and durations, and completed context
+compaction facts. Hermes relays display-safe child arguments and does not expose
+provider request or response bodies or a compaction start time through these
+callbacks. Those limits are explicit in `capabilities.json`. Memory and browser
+tools are disabled by this benchmark. Credentials, token usage, and cost
+accounting are not retained. Controller-owned final patch capture and container
+teardown remain outside the worker adapter boundary.
 
 Inference receives only the public fields `repo`, `instance_id`, `base_commit`,
 `problem_statement`, `requirements`, `interface`, `repo_language`, and
