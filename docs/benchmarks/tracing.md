@@ -81,14 +81,17 @@ redundant host collector or require sudo.
 AgentSight supplies independent process, filesystem, network, signal, memory,
 system, stdio, and TLS/HTTP evidence. It does not replace Hermes-native
 callbacks and does not change prompts, native delegation, provider attempts,
-timeouts, or retries. SWE model traffic is host-side. For Terminal-Bench, the
-adapter resolves the `libssl` loaded by the exact Hermes Python runtime and
-attaches it through `/proc/<container-init>/root`. AgentSight filters those TLS
-events to the task PID namespace, so capture needs neither a proxy nor a global
-TLS probe nor another collector. If discovery fails, best-effort mode retains
-process/filesystem/network evidence and reports `containerTls.active=false`;
-strict mode aborts before inference. The sidecar disables stdio because
-namespace-wide stdio capture is unavailable.
+timeouts, or retries. For SWE-bench, the adapter attaches TLS probes to the
+TLS-bearing binary used by the exact host Python worker that makes model
+requests: its loaded `libssl`, or the Python executable when OpenSSL is
+statically embedded. For Terminal-Bench, it resolves the equivalent binary in
+the exact container Python runtime and attaches it through
+`/proc/<container-init>/root`. Container probes are filtered to the task PID
+namespace, so capture needs neither a proxy nor a global TLS probe nor another
+collector. If discovery fails, best-effort mode retains
+process/filesystem/network evidence and reports the requested TLS scope as
+inactive; strict mode aborts before inference. The sidecar disables stdio
+because namespace-wide stdio capture is unavailable.
 
 Output is colocated under each trace attempt at `profiles/agentsight/`.
 Aggregate `profile.json`, `health.json`, and `summary.json` files report

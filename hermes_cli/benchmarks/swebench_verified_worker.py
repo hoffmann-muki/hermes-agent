@@ -505,6 +505,7 @@ def run_worker(
                     profile_id=trace_adapter.identity.trace_id,
                     host_pid=os.getpid(),
                     container_id=runtime_metadata["containerId"],
+                    capture_host_tls=True,
                 )
             )
         if termination_requested.is_set():

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import time
 from collections.abc import Mapping
@@ -37,6 +38,7 @@ class AgentSightTarget:
     profile_id: str
     host_pid: int | None = None
     container_id: str | None = None
+    capture_host_tls: bool = False
     capture_tls: bool = False
     tls_python_path: str | None = None
     correlation: Mapping[str, Any] | None = None
@@ -87,6 +89,8 @@ class AgentSightProfiler:
         self._docker: _DockerCollector | None = None
         self._source_status: dict[str, dict[str, Any]] = {}
         self._host_privilege: str | None = None
+        self._host_tls_binary_path: str | None = None
+        self._host_tls_error: str | None = None
         self._container_tls_binary_path: str | None = None
         self._container_tls_error: str | None = None
         self._finished = False
@@ -179,6 +183,10 @@ class AgentSightProfiler:
             if health.get("complete") is True
         ]
         tls_degraded = (
+            self.target.host_pid is not None
+            and self.target.capture_host_tls
+            and self._host_tls_binary_path is None
+        ) or (
             self.target.container_id is not None
             and self.target.capture_tls
             and self._container_tls_binary_path is None
@@ -199,6 +207,7 @@ class AgentSightProfiler:
                 "status": status,
                 "complete": status == "completed",
                 "sources": source_health,
+                "hostTls": self._host_tls_health(),
                 "containerTls": self._container_tls_health(),
             },
         )
@@ -211,6 +220,7 @@ class AgentSightProfiler:
                     scope: _summarize_health(health)
                     for scope, health in source_health.items()
                 },
+                "hostTls": self._host_tls_health(),
                 "containerTls": self._container_tls_health(),
             },
         )
@@ -248,14 +258,23 @@ class AgentSightProfiler:
             source_scopes=ready,
         )
         expected = self._expected_scopes()
-        tls_missing = (
+        host_tls_missing = (
+            self.target.host_pid is not None
+            and self.target.capture_host_tls
+            and self._host_tls_binary_path is None
+        )
+        container_tls_missing = (
             self.target.container_id is not None
             and self.target.capture_tls
             and self._container_tls_binary_path is None
         )
-        if self.strict and (set(ready) != set(expected) or tls_missing):
+        if self.strict and (
+            set(ready) != set(expected) or host_tls_missing or container_tls_missing
+        ):
             missing = sorted(set(expected) - set(ready))
-            if tls_missing:
+            if host_tls_missing:
+                missing.append("host-tls")
+            if container_tls_missing:
                 missing.append("task-container-tls")
             try:
                 self.finish()
@@ -294,12 +313,32 @@ class AgentSightProfiler:
             ),
         }
 
+    def _host_tls_health(self) -> dict[str, Any]:
+        if self.target.host_pid is None or not self.target.capture_host_tls:
+            return {"requested": False, "active": False}
+        return {
+            "requested": True,
+            "active": self._host_tls_binary_path is not None,
+            **(
+                {"binaryPath": self._host_tls_binary_path}
+                if self._host_tls_binary_path is not None
+                else {}
+            ),
+            **(
+                {"reason": self._host_tls_error}
+                if self._host_tls_error is not None
+                else {}
+            ),
+        }
+
     def _mark_unavailable(
         self,
         reason: str,
         *,
         expected_scopes: tuple[str, ...] | None = None,
     ) -> None:
+        if self.target.capture_host_tls and self._host_tls_error is None:
+            self._host_tls_error = reason
         if self.target.capture_tls and self._container_tls_error is None:
             self._container_tls_error = reason
         scopes = expected_scopes or tuple(self._expected_scopes())
@@ -326,6 +365,7 @@ class AgentSightProfiler:
                 "complete": False,
                 "reason": reason,
                 "sources": sources,
+                "hostTls": self._host_tls_health(),
                 "containerTls": self._container_tls_health(),
             },
         )
@@ -339,6 +379,7 @@ class AgentSightProfiler:
                     scope: _summarize_health(status)
                     for scope, status in sources.items()
                 },
+                "hostTls": self._host_tls_health(),
                 "containerTls": self._container_tls_health(),
             },
         )
@@ -366,6 +407,15 @@ class AgentSightProfiler:
             }
             return
         self._host_privilege = authorization.method
+        if self.target.capture_host_tls:
+            try:
+                self._host_tls_binary_path = resolve_host_tls_binary(
+                    self.target.host_pid
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                self._host_tls_error = (
+                    f"TLS binary resolution failed: {type(error).__name__}"
+                )
         stdout = None
         try:
             stdout = (source_dir / "collector.stdout.log").open("wb")
@@ -386,6 +436,7 @@ class AgentSightProfiler:
                     source_dir=source_dir,
                     profile_id=self.target.profile_id,
                     pid=self.target.host_pid,
+                    tls_binary_path=self._host_tls_binary_path,
                 )
                 stop_file = source_dir / "stop"
                 stop_file.unlink(missing_ok=True)
@@ -484,7 +535,7 @@ class AgentSightProfiler:
             return
         if self.target.capture_tls:
             try:
-                self._container_tls_binary_path = resolve_container_tls_library(
+                self._container_tls_binary_path = resolve_container_tls_binary(
                     str(self.target.container_id),
                     self.target.tls_python_path,
                     init_pid,
@@ -492,7 +543,7 @@ class AgentSightProfiler:
                 )
             except (OSError, RuntimeError, ValueError) as error:
                 self._container_tls_error = (
-                    f"TLS library resolution failed: {type(error).__name__}"
+                    f"TLS binary resolution failed: {type(error).__name__}"
                 )
         sidecar = _sidecar_name(self.target.profile_id, "task-container")
         _run(["docker", "rm", "--force", sidecar], self.env)
@@ -619,8 +670,16 @@ class AgentSightProfiler:
             "imageId": self.image_id,
             "hostPrivilege": self._host_privilege,
             "captureTls": (
-                self.target.capture_tls and self._container_tls_binary_path is not None
+                (
+                    self.target.capture_host_tls
+                    and self._host_tls_binary_path is not None
+                )
+                or (
+                    self.target.capture_tls
+                    and self._container_tls_binary_path is not None
+                )
             ),
+            "hostTls": self._host_tls_health(),
             "containerTls": self._container_tls_health(),
         }
         if self.target.correlation is not None:
@@ -636,10 +695,11 @@ def build_host_collector_args(
     source_dir: Path,
     profile_id: str,
     pid: int | None,
+    tls_binary_path: str | None = None,
 ) -> list[str]:
     if pid is None or pid <= 0:
         raise ValueError("host AgentSight capture requires a positive PID")
-    return [
+    args = [
         binary,
         "record",
         "--pid",
@@ -656,6 +716,9 @@ def build_host_collector_args(
         str(source_dir / "ready.json"),
         "--no-server",
     ]
+    if tls_binary_path is not None:
+        args.extend(["--binary-path", tls_binary_path, "--tls-binary-only"])
+    return args
 
 
 def build_docker_sidecar_args(
@@ -715,13 +778,13 @@ def build_docker_sidecar_args(
     ]
 
 
-def resolve_container_tls_library(
+def resolve_container_tls_binary(
     container_id: str,
     python_path: str | None,
     init_pid: int,
     env: dict[str, str],
 ) -> str:
-    """Resolve the exact container OpenSSL library for namespace-scoped TLS."""
+    """Resolve the container TLS-bearing library or Python executable."""
 
     if not container_id or not python_path or not python_path.startswith("/"):
         raise ValueError("container TLS discovery requires an absolute Python path")
@@ -735,27 +798,50 @@ def resolve_container_tls_library(
             python_path,
             "-c",
             (
-                "import ssl;"
+                "import ssl,sys;"
                 "from pathlib import Path;"
-                "print(next(line.split()[-1] for line in "
-                "Path('/proc/self/maps').read_text().splitlines() "
-                "if '/libssl.so' in line))"
+                "paths=sorted(set(line.split(None,5)[-1].removesuffix(' (deleted)') "
+                "for line in Path('/proc/self/maps').read_text().splitlines() "
+                "if '/libssl.so' in line));"
+                "assert len(paths)<=1;"
+                "binary=Path(paths[0] if paths else sys.executable).resolve();"
+                "assert binary.is_file();"
+                "print(binary)"
             ),
         ],
         env,
     )
     library = result.stdout.strip()
-    if (
-        result.returncode != 0
-        or "\n" in library
-        or not library.startswith("/")
-        or not Path(library).name.startswith("libssl.so")
-    ):
-        raise RuntimeError("Python runtime did not expose one OpenSSL library")
-    host_path = Path(f"/proc/{init_pid}/root") / library.removeprefix("/")
-    if not host_path.is_file():
-        raise RuntimeError("container OpenSSL library is not host-visible")
-    return str(host_path)
+    if result.returncode != 0 or "\n" in library or not library.startswith("/"):
+        raise RuntimeError("Python runtime did not expose one TLS-bearing binary")
+    # Docker Desktop and WSL place dockerd in another VM/PID namespace. The
+    # path is validated inside the target above and becomes visible only inside
+    # the --pid=host AgentSight sidecar.
+    return str(Path(f"/proc/{init_pid}/root") / library.removeprefix("/"))
+
+
+def resolve_host_tls_binary(pid: int | None) -> str:
+    """Resolve the TLS-bearing library or executable of a host Python worker."""
+
+    if pid is None or pid <= 0:
+        raise ValueError("host TLS discovery requires a positive PID")
+    if pid == os.getpid():
+        _ = ssl.OPENSSL_VERSION
+    libraries = {
+        line.split(None, 5)[-1].removesuffix(" (deleted)")
+        for line in Path(f"/proc/{pid}/maps").read_text(encoding="utf-8").splitlines()
+        if "/libssl.so" in line
+    }
+    if len(libraries) > 1:
+        raise RuntimeError("Python runtime exposed multiple OpenSSL libraries")
+    binary = (
+        Path(libraries.pop())
+        if libraries
+        else Path(f"/proc/{pid}/exe").resolve(strict=True)
+    )
+    if not binary.is_absolute() or not binary.is_file():
+        raise RuntimeError("host TLS-bearing binary is not accessible")
+    return str(binary)
 
 
 def resolve_docker_compose_main_container(

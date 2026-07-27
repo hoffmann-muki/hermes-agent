@@ -833,6 +833,13 @@ def test_worker_wires_trace_callbacks_without_a_model_call(tmp_path, monkeypatch
         },
     }
     fake_environment = SimpleNamespace(_container_id="a" * 64)
+    profile_targets = []
+
+    class OfflineProfiler:
+        strict = False
+
+        def finish(self):
+            return None
 
     class OfflineAgent:
         def __init__(self, callbacks):
@@ -873,6 +880,11 @@ def test_worker_wires_trace_callbacks_without_a_model_call(tmp_path, monkeypatch
     monkeypatch.setattr(worker, "configure_worker", lambda _request: None)
     monkeypatch.setattr(worker, "setup_environment", lambda _request: fake_environment)
     monkeypatch.setattr(
+        worker.AgentSightProfiler,
+        "start",
+        lambda target: profile_targets.append(target) or OfflineProfiler(),
+    )
+    monkeypatch.setattr(
         "tools.terminal_tool.clear_task_env_overrides", lambda _task_id: None
     )
 
@@ -894,6 +906,10 @@ def test_worker_wires_trace_callbacks_without_a_model_call(tmp_path, monkeypatch
     manifest = json.loads((attempt_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["execution"]["inference_timeout_seconds"] == 1800
     assert manifest["execution"]["evaluation_timeout_seconds"] == 3600
+    assert len(profile_targets) == 1
+    assert profile_targets[0].host_pid == os.getpid()
+    assert profile_targets[0].capture_host_tls is True
+    assert profile_targets[0].capture_tls is False
     assert (attempt_dir / "manifest.json").is_file()
     assert "file.read" in {
         event["event_type"] for event in _read_jsonl(attempt_dir / "events.jsonl")

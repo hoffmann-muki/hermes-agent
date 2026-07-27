@@ -15,8 +15,9 @@ from hermes_cli.benchmarks.tracing.agentsight import (
     build_docker_sidecar_args,
     build_host_collector_args,
     docker_compose_project_name,
-    resolve_container_tls_library,
+    resolve_container_tls_binary,
     resolve_docker_compose_main_container,
+    resolve_host_tls_binary,
 )
 from hermes_cli.benchmarks.tracing.privileges import (
     SudoAuthorizationError,
@@ -38,6 +39,26 @@ def test_host_scope_uses_research_capture_and_readiness(tmp_path: Path) -> None:
     assert "--profile-dir" in args
     assert "--ready-file" in args
     assert "--no-server" in args
+
+
+def test_host_collector_can_pin_tls_to_one_binary(tmp_path: Path) -> None:
+    args = build_host_collector_args(
+        binary="/usr/local/bin/agentsight",
+        source_dir=tmp_path / "host",
+        profile_id="trace-1",
+        pid=42,
+        tls_binary_path="/usr/lib/libssl.so.3",
+    )
+
+    assert args[args.index("--binary-path") + 1] == "/usr/lib/libssl.so.3"
+    assert "--tls-binary-only" in args
+
+
+def test_host_tls_binary_resolves_current_python_runtime() -> None:
+    binary = Path(resolve_host_tls_binary(os.getpid()))
+
+    assert binary.is_absolute()
+    assert binary.is_file()
 
 
 def test_host_collector_can_run_under_validated_sudo(tmp_path: Path) -> None:
@@ -254,12 +275,10 @@ def test_task_container_scope_uses_privileged_pid_host_sidecar(
     assert "--tls-binary-only" in tls_args
 
 
-def test_container_tls_library_uses_the_requested_python_runtime(
+def test_container_tls_binary_uses_the_requested_python_runtime(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    library = tmp_path / "libssl.so.3"
-    library.touch()
+    library = "/container-only/libssl.so.3"
     calls: list[list[str]] = []
 
     def run(
@@ -274,14 +293,14 @@ def test_container_tls_library_uses_the_requested_python_runtime(
         run,
     )
 
-    resolved = resolve_container_tls_library(
+    resolved = resolve_container_tls_binary(
         "task-container",
         "/opt/agent-venv/bin/python",
         os.getpid(),
         {"PATH": "/usr/bin"},
     )
 
-    assert resolved == f"/proc/{os.getpid()}/root/{str(library).lstrip('/')}"
+    assert resolved == f"/proc/{os.getpid()}/root/{library.lstrip('/')}"
     assert calls[0][:4] == [
         "docker",
         "exec",
@@ -464,6 +483,30 @@ def test_strict_mode_requires_requested_container_tls(
                 container_id="container",
                 capture_tls=True,
                 tls_python_path="/opt/agent-venv/bin/python",
+            ),
+            env={"BENCHMARK_AGENTSIGHT_STRICT": "1"},
+        )
+
+
+def test_strict_mode_requires_requested_host_tls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def start_host(profiler: AgentSightProfiler) -> None:
+        profiler._source_status["host"] = {
+            "status": "capturing",
+            "complete": False,
+        }
+
+    monkeypatch.setattr(AgentSightProfiler, "_start_host", start_host)
+
+    with pytest.raises(RuntimeError, match="host-tls"):
+        AgentSightProfiler.start(
+            AgentSightTarget(
+                attempt_dir=tmp_path,
+                profile_id="trace-strict-host-tls",
+                host_pid=42,
+                capture_host_tls=True,
             ),
             env={"BENCHMARK_AGENTSIGHT_STRICT": "1"},
         )
