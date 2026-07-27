@@ -40,6 +40,10 @@ from hermes_cli.benchmarks.swebench_verified import (
 from hermes_cli.benchmarks.native_delegation import (
     audit_native_delegations as audit_delegations,
 )
+from hermes_cli.benchmarks.tracing.agentsight import (
+    AgentSightProfiler,
+    AgentSightTarget,
+)
 
 
 COORDINATOR_BUDGET = DEFAULT_COORDINATOR_BUDGET
@@ -475,6 +479,7 @@ def run_worker(
     termination_requested = threading.Event()
     started_at = utc_now()
     runtime_metadata: dict[str, Any] | None = None
+    profiler: AgentSightProfiler | None = None
 
     def request_stop(_signum: int, _frame: Any) -> None:
         termination_requested.set()
@@ -494,6 +499,14 @@ def run_worker(
                 "docker_platform": request["dockerPlatform"],
                 "worktree": WORKTREE,
             })
+            profiler = AgentSightProfiler.start(
+                AgentSightTarget(
+                    attempt_dir=Path(trace_adapter.attempt_dir),
+                    profile_id=trace_adapter.identity.trace_id,
+                    host_pid=os.getpid(),
+                    container_id=runtime_metadata["containerId"],
+                )
+            )
         if termination_requested.is_set():
             raise BenchmarkError("Worker terminated during setup")
 
@@ -523,6 +536,12 @@ def run_worker(
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     finally:
+        if profiler is not None:
+            try:
+                profiler.finish()
+            except Exception as profile_error:
+                if profiler.strict:
+                    error = error or f"{type(profile_error).__name__}: {profile_error}"
         if trace_adapter is not None:
             trace_adapter.end_execution(
                 (
