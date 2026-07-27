@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -15,10 +16,13 @@ from harbor.agents.installed.hermes import Hermes
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from hermes_cli.benchmarks.tracing.agentsight import AgentSightProfiler
 from hermes_cli.benchmarks.tracing.harbor import (
     HarborTraceAttempt,
     allocate_harbor_trace_attempt,
+    attach_harbor_agentsight_profile,
     promote_harbor_trace_attempt,
+    start_harbor_agentsight_profile,
 )
 
 
@@ -80,6 +84,8 @@ class BenchmarkHermes(Hermes):
         self._benchmark_retries = benchmark_retries
         self._harbor_version = harbor_version
         self._trace_attempt: HarborTraceAttempt | None = None
+        self._agentsight_profiler: AgentSightProfiler | None = None
+        self._agentsight_python_path: str | None = None
         if prompt_template_path is None:
             logs_dir.mkdir(parents=True, exist_ok=True)
             prompt_template_path = logs_dir / "multiagent-prompt.j2"
@@ -121,6 +127,18 @@ class BenchmarkHermes(Hermes):
                 "hermes version"
             ),
         )
+        if self._trace_attempt is not None:
+            python_result = await self.exec_as_agent(
+                environment,
+                command=('readlink -f "$HOME/.hermes/hermes-agent/venv/bin/python"'),
+            )
+            python_path = python_result.stdout.strip()
+            if (
+                python_result.return_code == 0
+                and "\n" not in python_path
+                and python_path.startswith("/")
+            ):
+                self._agentsight_python_path = python_path
         for name in ("terminalbench_worker.py", "native_delegation.py"):
             source = Path(__file__).with_name(name)
             uploaded = self.logs_dir / name
@@ -163,7 +181,12 @@ class BenchmarkHermes(Hermes):
             "OPENROUTER_API_KEY": api_key,
         }
         if self._trace_attempt is not None:
-            if self.session_id is None or self._commit is None:
+            if (
+                self.session_id is None
+                or self._commit is None
+                or self._trace_run_id is None
+                or self._trace_benchmark is None
+            ):
                 raise ValueError("Harbor did not initialize Hermes trace identity")
             env["HERMES_BENCHMARK_TRACE_CONFIG"] = json.dumps(
                 {
@@ -176,15 +199,23 @@ class BenchmarkHermes(Hermes):
                     "frameworkRevision": self._commit.lower(),
                     "model": self.model_name,
                     "evaluationWorkers": self._evaluation_workers,
-                    "agentTimeoutSeconds": (
-                        self._trace_attempt.agent_timeout_seconds
-                    ),
+                    "agentTimeoutSeconds": (self._trace_attempt.agent_timeout_seconds),
                     "benchmarkRetries": self._benchmark_retries,
                     "harborVersion": self._harbor_version,
                     "sessionId": self.session_id,
                     "containerImage": self._trace_attempt.container_image,
                 },
                 separators=(",", ":"),
+            )
+            self._agentsight_profiler = await asyncio.to_thread(
+                start_harbor_agentsight_profile,
+                logs_dir=self.logs_dir,
+                trace_run_id=self._trace_run_id,
+                benchmark=self._trace_benchmark,
+                framework="hermes",
+                attempt=self._trace_attempt,
+                docker_session_id=environment.session_id,
+                tls_python_path=self._agentsight_python_path,
             )
         command = """set -e
 export PATH="$HOME/.local/bin:$PATH"
@@ -198,10 +229,14 @@ fi
         # BaseInstalledAgent._exec includes per-command environment values in
         # debug metadata. Invoke the environment directly so credentials never
         # enter Harbor's agent log record.
-        result = await environment.exec(
-            command=f"set -o pipefail; {command}",
-            env=env,
-        )
+        try:
+            result = await environment.exec(
+                command=f"set -o pipefail; {command}",
+                env=env,
+            )
+        finally:
+            if self._agentsight_profiler is not None:
+                await asyncio.to_thread(self._agentsight_profiler.finish)
         if result.return_code != 0:
             raise self._classify_exec_error(command, result)
 
@@ -210,6 +245,24 @@ fi
         super().populate_context_post_run(context)
         if self._trace_attempt is not None and self._trace_root is not None:
             metadata = {**(context.metadata or {})}
+            try:
+                if self._agentsight_profiler is None:
+                    raise ValueError("Hermes AgentSight profiler was not initialized")
+                attach_harbor_agentsight_profile(
+                    logs_dir=self.logs_dir,
+                    attempt=self._trace_attempt,
+                    profiler=self._agentsight_profiler,
+                )
+            except Exception as error:
+                metadata["agentsight_profile"] = {
+                    "health": "failed",
+                    "error": type(error).__name__,
+                }
+                if (
+                    self._agentsight_profiler is not None
+                    and self._agentsight_profiler.strict
+                ):
+                    raise
             try:
                 destination = promote_harbor_trace_attempt(
                     logs_dir=self.logs_dir,
@@ -221,6 +274,12 @@ fi
                     "instance_id": self._trace_attempt.instance_id,
                     "attempt": self._trace_attempt.attempt,
                 }
+                profile_path = destination / "profiles" / "agentsight"
+                if profile_path.is_dir() and self._agentsight_profiler is not None:
+                    metadata["agentsight_profile"] = {
+                        "path": str(profile_path),
+                        "profile_id": self._agentsight_profiler.target.profile_id,
+                    }
             except Exception as error:
                 metadata["benchmark_trace"] = {
                     "health": "failed",

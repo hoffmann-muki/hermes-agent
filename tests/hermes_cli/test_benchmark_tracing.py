@@ -27,8 +27,10 @@ from hermes_cli.benchmarks import tracing as tracing_package
 from hermes_cli.benchmarks.tracing.harbor import (
     HarborTraceHarness,
     allocate_harbor_trace_attempt,
+    attach_harbor_agentsight_profile,
     finalize_harbor_trace_run,
     promote_harbor_trace_attempt,
+    start_harbor_agentsight_profile,
     trace_instance_ids_from_job,
 )
 from hermes_cli.benchmarks.tracing.execution_tree import (
@@ -433,6 +435,23 @@ def test_harbor_bridge_preserves_multiple_native_attempts(tmp_path, monkeypatch)
         adapter.container_observed({"image": allocation.container_image})
         adapter.start_session(f"task-a-attempt-{expected_attempt}")
         adapter.finish("completed", messages=[])
+        profiler = start_harbor_agentsight_profile(
+            logs_dir=logs_dir,
+            trace_run_id=run.id,
+            benchmark=run.benchmark,
+            framework="hermes",
+            attempt=allocation,
+            docker_session_id=f"task-a__trial-{expected_attempt}",
+            tls_python_path="/home/agent/hermes/venv/bin/python",
+            env={"BENCHMARK_AGENTSIGHT": "off"},
+        )
+        profiler.finish()
+        assert profiler.target.capture_tls is True
+        attach_harbor_agentsight_profile(
+            logs_dir=logs_dir,
+            attempt=allocation,
+            profiler=profiler,
+        )
         promoted = promote_harbor_trace_attempt(
             logs_dir=logs_dir,
             trace_root=run.root,
@@ -441,6 +460,11 @@ def test_harbor_bridge_preserves_multiple_native_attempts(tmp_path, monkeypatch)
 
         assert allocation.attempt == expected_attempt
         assert promoted.name == f"attempt-{expected_attempt}"
+        profile = json.loads(
+            (promoted / "profiles" / "agentsight" / "profile.json").read_text()
+        )
+        assert profile["correlation"]["attempt"] == expected_attempt
+        assert profile["correlation"]["framework"] == "hermes"
 
     run_index = finalize_harbor_trace_run(
         trace_root=run.root,

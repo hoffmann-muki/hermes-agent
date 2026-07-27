@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -36,6 +37,9 @@ class AgentSightTarget:
     profile_id: str
     host_pid: int | None = None
     container_id: str | None = None
+    capture_tls: bool = False
+    tls_python_path: str | None = None
+    correlation: Mapping[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -83,6 +87,8 @@ class AgentSightProfiler:
         self._docker: _DockerCollector | None = None
         self._source_status: dict[str, dict[str, Any]] = {}
         self._host_privilege: str | None = None
+        self._container_tls_binary_path: str | None = None
+        self._container_tls_error: str | None = None
         self._finished = False
 
     @classmethod
@@ -115,6 +121,24 @@ class AgentSightProfiler:
             profiler._finished = True
         return profiler
 
+    @classmethod
+    def unavailable(
+        cls,
+        target: AgentSightTarget,
+        reason: str,
+        *,
+        expected_scopes: tuple[str, ...],
+        env: dict[str, str] | None = None,
+    ) -> AgentSightProfiler:
+        """Persist a non-capturing profile when a runtime scope cannot resolve."""
+
+        profiler = cls(target, env=env)
+        profiler._mark_unavailable(reason, expected_scopes=expected_scopes)
+        profiler._finished = True
+        if profiler.strict and not _disabled(profiler.env):
+            raise RuntimeError(f"AgentSight {reason}")
+        return profiler
+
     def finish(self) -> None:
         if self._finished:
             return
@@ -134,8 +158,19 @@ class AgentSightProfiler:
                     ),
                 }
         source_health = {
-            scope: _read_object(self.sources_dir / scope / "health.json") or status
-            for scope, status in self._source_status.items()
+            scope: health
+            if (health := _read_object(self.sources_dir / scope / "health.json"))
+            is not None
+            else (
+                {
+                    **source_status,
+                    "complete": False,
+                    "reason": "collector health record is missing",
+                }
+                if source_status.get("complete") is True
+                else source_status
+            )
+            for scope, source_status in self._source_status.items()
         }
         expected = self._expected_scopes()
         completed = [
@@ -143,9 +178,14 @@ class AgentSightProfiler:
             for scope, health in source_health.items()
             if health.get("complete") is True
         ]
+        tls_degraded = (
+            self.target.container_id is not None
+            and self.target.capture_tls
+            and self._container_tls_binary_path is None
+        )
         status = (
             "completed"
-            if expected and set(completed) == set(expected)
+            if expected and set(completed) == set(expected) and not tls_degraded
             else "degraded"
             if completed
             else "unavailable"
@@ -159,6 +199,7 @@ class AgentSightProfiler:
                 "status": status,
                 "complete": status == "completed",
                 "sources": source_health,
+                "containerTls": self._container_tls_health(),
             },
         )
         _write_json_atomic(
@@ -170,6 +211,7 @@ class AgentSightProfiler:
                     scope: _summarize_health(health)
                     for scope, health in source_health.items()
                 },
+                "containerTls": self._container_tls_health(),
             },
         )
         if self.strict and not _disabled(self.env) and status != "completed":
@@ -206,8 +248,15 @@ class AgentSightProfiler:
             source_scopes=ready,
         )
         expected = self._expected_scopes()
-        if self.strict and set(ready) != set(expected):
+        tls_missing = (
+            self.target.container_id is not None
+            and self.target.capture_tls
+            and self._container_tls_binary_path is None
+        )
+        if self.strict and (set(ready) != set(expected) or tls_missing):
             missing = sorted(set(expected) - set(ready))
+            if tls_missing:
+                missing.append("task-container-tls")
             try:
                 self.finish()
             except RuntimeError:
@@ -227,14 +276,40 @@ class AgentSightProfiler:
             if present
         ]
 
-    def _mark_unavailable(self, reason: str) -> None:
+    def _container_tls_health(self) -> dict[str, Any]:
+        if self.target.container_id is None or not self.target.capture_tls:
+            return {"requested": False, "active": False}
+        return {
+            "requested": True,
+            "active": self._container_tls_binary_path is not None,
+            **(
+                {"binaryPath": self._container_tls_binary_path}
+                if self._container_tls_binary_path is not None
+                else {}
+            ),
+            **(
+                {"reason": self._container_tls_error}
+                if self._container_tls_error is not None
+                else {}
+            ),
+        }
+
+    def _mark_unavailable(
+        self,
+        reason: str,
+        *,
+        expected_scopes: tuple[str, ...] | None = None,
+    ) -> None:
+        if self.target.capture_tls and self._container_tls_error is None:
+            self._container_tls_error = reason
+        scopes = expected_scopes or tuple(self._expected_scopes())
         sources = {
             scope: {
                 "status": "unavailable",
                 "complete": False,
                 "reason": reason,
             }
-            for scope in self._expected_scopes()
+            for scope in scopes
         }
         self._source_status = sources
         self._write_root_profile(
@@ -251,6 +326,7 @@ class AgentSightProfiler:
                 "complete": False,
                 "reason": reason,
                 "sources": sources,
+                "containerTls": self._container_tls_health(),
             },
         )
         _write_json_atomic(
@@ -263,6 +339,7 @@ class AgentSightProfiler:
                     scope: _summarize_health(status)
                     for scope, status in sources.items()
                 },
+                "containerTls": self._container_tls_health(),
             },
         )
 
@@ -348,8 +425,7 @@ class AgentSightProfiler:
                 "status": "unavailable",
                 "complete": False,
                 "reason": (
-                    "host collector did not become ready after privilege "
-                    "authorization"
+                    "host collector did not become ready after privilege authorization"
                 ),
             }
             return
@@ -406,6 +482,18 @@ class AgentSightProfiler:
                 ),
             }
             return
+        if self.target.capture_tls:
+            try:
+                self._container_tls_binary_path = resolve_container_tls_library(
+                    str(self.target.container_id),
+                    self.target.tls_python_path,
+                    init_pid,
+                    self.env,
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                self._container_tls_error = (
+                    f"TLS library resolution failed: {type(error).__name__}"
+                )
         sidecar = _sidecar_name(self.target.profile_id, "task-container")
         _run(["docker", "rm", "--force", sidecar], self.env)
         launched = _run(
@@ -416,6 +504,7 @@ class AgentSightProfiler:
                 profile_id=self.target.profile_id,
                 init_pid=init_pid,
                 stop_timeout=self.stop_timeout,
+                tls_binary_path=self._container_tls_binary_path,
             ),
             self.env,
         )
@@ -520,7 +609,7 @@ class AgentSightProfiler:
             "schema": PROFILE_SCHEMA,
             "profileId": self.target.profile_id,
             "status": status,
-            "topology": "host-process-plus-docker-pid-host-sidecar",
+            "topology": _topology(self.target),
             "sourceScopes": source_scopes,
             "startedAt": _iso(self.started_at),
             "updatedAt": _iso(time.time()),
@@ -529,7 +618,13 @@ class AgentSightProfiler:
             "image": self.image,
             "imageId": self.image_id,
             "hostPrivilege": self._host_privilege,
+            "captureTls": (
+                self.target.capture_tls and self._container_tls_binary_path is not None
+            ),
+            "containerTls": self._container_tls_health(),
         }
+        if self.target.correlation is not None:
+            payload["correlation"] = dict(self.target.correlation)
         if reason:
             payload["reason"] = reason
         _write_json_atomic(self.directory / "profile.json", payload)
@@ -571,7 +666,33 @@ def build_docker_sidecar_args(
     profile_id: str,
     init_pid: int,
     stop_timeout: int,
+    tls_binary_path: str | None = None,
 ) -> list[str]:
+    record = [
+        "record",
+        "--pidns-filter",
+        f"/proc/{init_pid}/ns/pid",
+        "--capture-level",
+        "research",
+        "--profile-dir",
+        "/output",
+        "--profile-id",
+        profile_id,
+        "--scope-id",
+        "task-container",
+        "--ready-file",
+        "/output/ready.json",
+        "--no-server",
+        "--no-stdio",
+    ]
+    if tls_binary_path is None:
+        record.append("--no-ssl")
+    else:
+        record.extend([
+            "--binary-path",
+            tls_binary_path,
+            "--tls-binary-only",
+        ])
     return [
         "docker",
         "run",
@@ -590,23 +711,96 @@ def build_docker_sidecar_args(
         "--volume",
         f"{source_dir.resolve()}:/output",
         image,
-        "record",
-        "--pidns-filter",
-        f"/proc/{init_pid}/ns/pid",
-        "--capture-level",
-        "research",
-        "--profile-dir",
-        "/output",
-        "--profile-id",
-        profile_id,
-        "--scope-id",
-        "task-container",
-        "--ready-file",
-        "/output/ready.json",
-        "--no-server",
-        "--no-ssl",
-        "--no-stdio",
+        *record,
     ]
+
+
+def resolve_container_tls_library(
+    container_id: str,
+    python_path: str | None,
+    init_pid: int,
+    env: dict[str, str],
+) -> str:
+    """Resolve the exact container OpenSSL library for namespace-scoped TLS."""
+
+    if not container_id or not python_path or not python_path.startswith("/"):
+        raise ValueError("container TLS discovery requires an absolute Python path")
+    if init_pid <= 0:
+        raise ValueError("container TLS discovery requires a positive init PID")
+    result = _run(
+        [
+            "docker",
+            "exec",
+            container_id,
+            python_path,
+            "-c",
+            (
+                "import ssl;"
+                "from pathlib import Path;"
+                "print(next(line.split()[-1] for line in "
+                "Path('/proc/self/maps').read_text().splitlines() "
+                "if '/libssl.so' in line))"
+            ),
+        ],
+        env,
+    )
+    library = result.stdout.strip()
+    if (
+        result.returncode != 0
+        or "\n" in library
+        or not library.startswith("/")
+        or not Path(library).name.startswith("libssl.so")
+    ):
+        raise RuntimeError("Python runtime did not expose one OpenSSL library")
+    host_path = Path(f"/proc/{init_pid}/root") / library.removeprefix("/")
+    if not host_path.is_file():
+        raise RuntimeError("container OpenSSL library is not host-visible")
+    return str(host_path)
+
+
+def resolve_docker_compose_main_container(
+    session_id: str,
+    env: dict[str, str] | None = None,
+) -> str:
+    """Resolve Harbor's running main service without Harbor-private APIs."""
+
+    if not session_id:
+        raise ValueError("Docker Compose session ID cannot be empty")
+    effective_env = dict(os.environ if env is None else env)
+    project = docker_compose_project_name(session_id)
+    result = _run(
+        [
+            "docker",
+            "ps",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+            "--filter",
+            "label=com.docker.compose.service=main",
+            "--format",
+            "{{.ID}}",
+        ],
+        effective_env,
+    )
+    containers = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or len(containers) != 1:
+        detail = (
+            result.stderr.strip() or result.stdout.strip() or "no matching container"
+        )
+        raise RuntimeError(
+            f"could not resolve Harbor main container for {project}: {detail}"
+        )
+    return containers[0]
+
+
+def docker_compose_project_name(value: str) -> str:
+    """Match Docker Compose's project-name normalization used by Harbor."""
+
+    normalized = value.lower()
+    allowed_initial = "abcdefghijklmnopqrstuvwxyz0123456789"
+    allowed = f"{allowed_initial}_-"
+    if not normalized or normalized[0] not in allowed_initial:
+        normalized = f"0{normalized}"
+    return "".join(char if char in allowed else "-" for char in normalized)
 
 
 def _wait_for_ready(
@@ -688,6 +882,16 @@ def _sidecar_name(profile_id: str, scope_id: str) -> str:
         for char in f"agentsight-{profile_id}-{scope_id}".lower()
     )
     return value[:120].rstrip("-_.") or "agentsight-profile"
+
+
+def _topology(target: AgentSightTarget) -> str:
+    if target.host_pid is not None and target.container_id is not None:
+        return "host-process-plus-docker-pid-host-sidecar"
+    if target.container_id is not None:
+        return "docker-pid-host-sidecar"
+    if target.host_pid is not None:
+        return "host-process"
+    return "unresolved"
 
 
 def _summarize_health(health: dict[str, Any]) -> dict[str, Any]:

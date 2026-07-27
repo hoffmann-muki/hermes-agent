@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -12,6 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from hermes_cli.benchmarks.tracing.agentsight import (
+    AgentSightProfiler,
+    AgentSightTarget,
+    resolve_docker_compose_main_container,
+)
 from hermes_cli.benchmarks.tracing.coordination import (
     TraceRun,
     TraceSelection,
@@ -24,6 +30,7 @@ from hermes_cli.benchmarks.tracing.runtime import attempt_directory
 
 _ALLOCATION_FILENAME = ".harbor-attempts.json"
 _LOCK_FILENAME = ".harbor-attempts.lock"
+_AGENTSIGHT_STAGING_DIRECTORY = ".agentsight-profile"
 
 
 @dataclass(frozen=True)
@@ -140,6 +147,119 @@ def promote_harbor_trace_attempt(
         destination.chmod(0o700)
     shutil.rmtree(logs_dir / attempt.container_root.name, ignore_errors=True)
     return destination
+
+
+def start_harbor_agentsight_profile(
+    *,
+    logs_dir: Path,
+    trace_run_id: str,
+    benchmark: str,
+    framework: str,
+    attempt: HarborTraceAttempt,
+    docker_session_id: str,
+    tls_python_path: str | None,
+    env: dict[str, str] | None = None,
+) -> AgentSightProfiler:
+    """Start one container-scoped AgentSight profile for a Harbor attempt."""
+
+    effective_env = dict(os.environ if env is None else env)
+    profile_id = harbor_agentsight_profile_id(
+        run_id=trace_run_id,
+        framework=framework,
+        instance_id=attempt.instance_id,
+        attempt=attempt.attempt,
+    )
+    staging = logs_dir / _AGENTSIGHT_STAGING_DIRECTORY
+    correlation = {
+        "runId": trace_run_id,
+        "benchmark": benchmark,
+        "framework": framework,
+        "instanceId": attempt.instance_id,
+        "attempt": attempt.attempt,
+    }
+    target = AgentSightTarget(
+        attempt_dir=staging,
+        profile_id=profile_id,
+        container_id="disabled",
+        capture_tls=True,
+        tls_python_path=tls_python_path,
+        correlation=correlation,
+    )
+    if _agentsight_disabled(effective_env):
+        return AgentSightProfiler.start(target, env=effective_env)
+    try:
+        container_id = resolve_docker_compose_main_container(
+            docker_session_id,
+            effective_env,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        return AgentSightProfiler.unavailable(
+            target,
+            f"task-container resolution failed: {type(error).__name__}",
+            expected_scopes=("task-container",),
+            env=effective_env,
+        )
+    return AgentSightProfiler.start(
+        AgentSightTarget(
+            attempt_dir=staging,
+            profile_id=profile_id,
+            container_id=container_id,
+            capture_tls=True,
+            tls_python_path=tls_python_path,
+            correlation=correlation,
+        ),
+        env=effective_env,
+    )
+
+
+def attach_harbor_agentsight_profile(
+    *,
+    logs_dir: Path,
+    attempt: HarborTraceAttempt,
+    profiler: AgentSightProfiler,
+) -> Path:
+    """Attach a staged profile to its finalized semantic trace attempt."""
+
+    source = profiler.directory
+    semantic_attempt = attempt_directory(
+        logs_dir / attempt.container_root.name,
+        attempt.instance_id,
+        attempt.attempt,
+    )
+    destination = semantic_attempt / "profiles" / "agentsight"
+    if not source.is_dir() or source.is_symlink():
+        raise ValueError(f"Harbor AgentSight profile is missing: {source}")
+    if any(path.is_symlink() for path in source.rglob("*")):
+        raise ValueError("Harbor AgentSight profile contains a symbolic link")
+    if not semantic_attempt.is_dir() or semantic_attempt.is_symlink():
+        raise ValueError(f"Harbor semantic trace is missing: {semantic_attempt}")
+    if destination.exists():
+        raise FileExistsError(
+            f"Harbor semantic trace already has an AgentSight profile: {destination}"
+        )
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    shutil.copytree(source, destination)
+    if os.name != "nt":
+        destination.chmod(0o700)
+    shutil.rmtree(profiler.target.attempt_dir, ignore_errors=True)
+    return destination
+
+
+def harbor_agentsight_profile_id(
+    *,
+    run_id: str,
+    framework: str,
+    instance_id: str,
+    attempt: int,
+) -> str:
+    """Return a deterministic profiler identity for one semantic attempt."""
+
+    if not run_id or not framework or not instance_id or attempt < 1:
+        raise ValueError("Harbor AgentSight profile identity is invalid")
+    digest = hashlib.sha256(
+        "\0".join((run_id, framework, instance_id, str(attempt))).encode()
+    ).hexdigest()
+    return f"agentsight-{digest[:32]}"
 
 
 def finalize_harbor_trace_run(
@@ -319,3 +439,12 @@ def _atomic_write_json(path: Path, value: dict[str, int]) -> None:
 def _remove_allocator_files(root: Path) -> None:
     for name in (_ALLOCATION_FILENAME, _LOCK_FILENAME):
         (root / name).unlink(missing_ok=True)
+
+
+def _agentsight_disabled(env: dict[str, str]) -> bool:
+    return env.get("BENCHMARK_AGENTSIGHT", "").strip().lower() in {
+        "0",
+        "false",
+        "off",
+        "disabled",
+    }

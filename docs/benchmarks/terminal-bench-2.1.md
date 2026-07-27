@@ -123,6 +123,11 @@ excluded from the normalized trace.
 Terminal-Bench uses the reusable Harbor tracing adapter described in
 [Benchmark tracing architecture](tracing.md); its benchmark identity is
 configuration rather than hard-coded trace extraction logic.
+The same adapter starts one network-isolated AgentSight PID-namespace sidecar
+after Harbor creates the `main` task container and before Hermes begins agent
+work. The profile is stopped before teardown and promoted under the semantic
+attempt's `profiles/agentsight/` directory. No separate profiling command or
+host collector is required.
 
 Artifacts are written below:
 
