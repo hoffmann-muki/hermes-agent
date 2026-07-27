@@ -51,12 +51,21 @@ def test_explicit_task_ids_preserve_order_and_cli_aliases():
         "--run-id",
         "selected",
         "--task-id",
-        "task-a",
+        "terminal-bench/task-a",
         "--task-name",
         "task-b",
     ])
 
     assert options.task_names == ("task-a", "task-b")
+    with pytest.raises(SystemExit):
+        benchmark.parse_args([
+            "--task-id",
+            "task-a",
+            "--task-id",
+            "terminal-bench/task-a",
+        ])
+    with pytest.raises(SystemExit):
+        benchmark.parse_args(["--task-id", "another-package/task-a"])
 
 
 def test_full_and_leaderboard_modes_have_peer_semantics():
@@ -125,7 +134,7 @@ def test_harbor_command_is_reproducible_and_credential_free(tmp_path: Path):
     assert command[command.index("--n-attempts") + 1] == "2"
     assert command[command.index("--n-concurrent") + 1] == "3"
     assert command[command.index("--max-retries") + 1] == "0"
-    assert command[command.index("--include-task-name") + 1] == "task-a"
+    assert command[command.index("--include-task-name") + 1] == "terminal-bench/task-a"
     assert command[command.index("--n-tasks") + 1] == "1"
     assert "OPENROUTER_API_KEY" not in rendered
 

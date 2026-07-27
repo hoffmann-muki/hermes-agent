@@ -35,6 +35,7 @@ from hermes_cli.benchmarks.tracing.harbor import (
 
 BENCHMARK = "terminal-bench-2.1"
 DATASET = "terminal-bench/terminal-bench-2-1"
+TASK_PREFIX = "terminal-bench/"
 OFFICIAL_TASK_COUNT = 89
 DEFAULT_MODEL = "openrouter/qwen/qwen3-coder-next"
 DEFAULT_OUTPUT_DIR = ".benchmark-runs/terminal-bench-2.1"
@@ -169,7 +170,13 @@ Examples:
   hermes-terminalbench --leaderboard --concurrency 4
 """,
     )
-    parser.add_argument("--task-id", "--task-name", action="append", dest="task_names")
+    parser.add_argument(
+        "--task-id",
+        "--task-name",
+        action="append",
+        dest="task_names",
+        help=("Official task name; terminal-bench/ is optional. Repeatable"),
+    )
     parser.add_argument(
         "--max-tasks",
         "--n-limit",
@@ -254,7 +261,10 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     raw_args = list(argv if argv is not None else sys.argv[1:])
     parser = build_parser()
     args = parser.parse_args(raw_args)
-    task_names = tuple(args.task_names or ())
+    try:
+        task_names = normalize_task_names(args.task_names or ())
+    except ValueError as exc:
+        parser.error(str(exc))
     max_tasks = args.max_tasks
 
     max_tasks_was_set = "--max-tasks" in raw_args or "--n-limit" in raw_args
@@ -318,6 +328,18 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         dry_run=args.dry_run,
         trace_dir=args.trace_dir,
     )
+
+
+def normalize_task_names(task_names: Sequence[str]) -> tuple[str, ...]:
+    normalized = tuple(task_name.removeprefix(TASK_PREFIX) for task_name in task_names)
+    if any(not task_name or "/" in task_name for task_name in normalized):
+        raise ValueError(
+            "Terminal-Bench task IDs must be bare names or use the "
+            f"{TASK_PREFIX} prefix"
+        )
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("Terminal-Bench task IDs must be unique")
+    return normalized
 
 
 def build_paths(options: Options) -> RunPaths:
@@ -384,7 +406,7 @@ def build_harbor_command(
         options.run_id,
     ]
     for task_name in options.task_names:
-        command.extend(["--include-task-name", task_name])
+        command.extend(["--include-task-name", f"{TASK_PREFIX}{task_name}"])
     if options.max_tasks is not None:
         command.extend(["--n-tasks", str(options.max_tasks)])
     if options.upload:

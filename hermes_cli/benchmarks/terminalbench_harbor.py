@@ -120,7 +120,7 @@ class BenchmarkHermes(Hermes):
                 'mkdir -p "$(dirname "$INSTALL_DIR")"; '
                 f"git clone --filter=blob:none --branch {shlex.quote(self._version)} "
                 f'{shlex.quote(self._repository)} "$INSTALL_DIR"; '
-                'bash "$INSTALL_DIR/scripts/install.sh" --skip-setup '
+                'bash "$INSTALL_DIR/scripts/install.sh" --skip-setup --skip-browser '
                 f"--branch {shlex.quote(self._version)}{commit_flag} "
                 '--dir "$INSTALL_DIR"; '
                 'export PATH="$HOME/.local/bin:$PATH"; '
