@@ -268,6 +268,57 @@ def test_execution_tree_pairs_spans_and_marks_concurrent_siblings():
     )
 
 
+def test_execution_tree_duration_is_stable_across_language_runtimes():
+    events = [
+        {
+            **_projection_event(
+                1,
+                "attempt.start",
+                "start",
+                "started",
+                "attempt",
+                0,
+            ),
+            "occurred_at": "2026-01-01T00:00:00.000Z",
+            "recorded_at": "2026-01-01T00:00:00.000Z",
+        },
+        {
+            **_projection_event(
+                2,
+                "attempt.end",
+                "end",
+                "completed",
+                "attempt",
+                0,
+            ),
+            "occurred_at": "2026-01-01T00:02:08.824Z",
+            "recorded_at": "2026-01-01T00:02:08.824Z",
+            "timing": {"fidelity": "derived"},
+        },
+    ]
+    content = b"".join(
+        json.dumps(event, separators=(",", ":")).encode() + b"\n" for event in events
+    )
+
+    tree = build_execution_tree(
+        events,
+        identity=TraceIdentity(
+            trace_id="trace-duration",
+            run_id="run-duration",
+            benchmark="custom-benchmark",
+            framework="hermes",
+            instance_id="instance-1",
+            attempt=1,
+        ),
+        schema_digest=SCHEMA_DIGEST,
+        events_content=content,
+    )
+    attempt = tree["root"]["children"][0]
+
+    assert tree["root"]["duration_ms"] == 128_824.0
+    assert attempt["duration_ms"] == 128_824.0
+
+
 def test_execution_tree_represents_an_empty_recovered_journal():
     tree = build_execution_tree(
         [],

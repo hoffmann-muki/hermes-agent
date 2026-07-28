@@ -212,7 +212,10 @@ def build_execution_tree(
             "node_id": "trace-root",
             "started_at": _format_timestamp(started_at),
             "ended_at": _format_timestamp(ended_at),
-            "duration_ms": max(0.0, (ended_at - started_at).total_seconds() * 1000),
+            "duration_ms": max(
+                0.0,
+                _elapsed_milliseconds(started_at, ended_at),
+            ),
             "children": [node.as_json() for node in roots],
         },
         "warnings": warnings,
@@ -477,7 +480,19 @@ def _event_duration(
         return None
     return max(
         0.0,
-        (_timestamp(ended_at) - _timestamp(started_at)).total_seconds() * 1000,
+        _elapsed_milliseconds(
+            _timestamp(started_at),
+            _timestamp(ended_at),
+        ),
+    )
+
+
+def _elapsed_milliseconds(started_at: datetime, ended_at: datetime) -> float:
+    elapsed = ended_at - started_at
+    return (
+        elapsed.days * 86_400_000
+        + elapsed.seconds * 1_000
+        + elapsed.microseconds / 1_000
     )
 
 
