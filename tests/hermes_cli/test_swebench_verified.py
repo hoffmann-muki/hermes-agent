@@ -69,7 +69,7 @@ def test_cli_defaults_match_other_frameworks(tmp_path):
 
     assert options.instance_ids == (benchmark.DEFAULT_SMOKE_INSTANCE_ID,)
     assert options.model == "openrouter/qwen/qwen3-coder-next"
-    assert options.agent_timeout_seconds == 1800
+    assert options.agent_timeout_seconds == 900
     assert options.setup_timeout_seconds == 600
     assert benchmark.DEFAULT_INFERENCE_WORKERS == 1
     assert benchmark.DEFAULT_EVALUATION_WORKERS == 1
@@ -1378,7 +1378,7 @@ def test_dry_run_reports_parity_contract_without_requiring_api_key(tmp_path, cap
     assert payload["maxInfrastructureRetries"] == 0
     assert payload["apiMaxRetries"] == 1
     assert payload["codingContext"] == "off"
-    assert payload["agentTimeoutSeconds"] == 1800
+    assert payload["agentTimeoutSeconds"] == 900
     assert payload["setupTimeoutSeconds"] == 600
     assert payload["sequence"] == ["coordinator", "navigator", "patcher", "reviewer"]
     assert payload["delegationMode"] == "native"

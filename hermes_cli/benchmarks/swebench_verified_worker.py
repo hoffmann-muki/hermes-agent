@@ -207,7 +207,7 @@ def configure_worker(request: dict[str, Any]) -> None:
     hermes_home.mkdir(parents=True, exist_ok=True)
     os.environ["HERMES_HOME"] = str(hermes_home)
     # Hermes runs all model tools through a guarded worker pool whose normal
-    # seven-minute ceiling is shorter than this benchmark's shared 30-minute
+    # seven-minute ceiling is shorter than this benchmark's shared 15-minute
     # agent deadline. This existing internal runtime knob is scoped to the
     # disposable worker process; the controller remains the hard wall clock.
     os.environ["HERMES_CONCURRENT_TOOL_TIMEOUT_S"] = str(

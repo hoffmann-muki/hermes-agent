@@ -19,7 +19,7 @@ this workspace:
 | Inference/evaluation workers | `1` / `1` |
 | Attempts/retries | `1` / `0` |
 | Hermes API attempts/retries per model call | `1` / `0` (`api_max_retries: 1`) |
-| Agent deadline | 1,800 seconds |
+| Agent deadline | 900 seconds |
 | Agent sequence | coordinator → navigator → patcher → reviewer |
 | Iteration budgets | Coordinator `24`; three native children at `13` each |
 | Evaluator | `swebench==4.1.0`, local Docker |
