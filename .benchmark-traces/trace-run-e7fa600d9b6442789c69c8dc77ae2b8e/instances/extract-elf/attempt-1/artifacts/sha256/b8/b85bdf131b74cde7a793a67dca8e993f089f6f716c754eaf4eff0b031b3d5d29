@@ -1,0 +1,1 @@
+{"command":"od -A d -t x1 /app/a.out | sed -n '190,191p'"}

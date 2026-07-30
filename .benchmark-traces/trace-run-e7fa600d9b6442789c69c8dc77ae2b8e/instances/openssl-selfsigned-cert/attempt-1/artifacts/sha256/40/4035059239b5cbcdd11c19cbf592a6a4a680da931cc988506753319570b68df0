@@ -1,0 +1,1 @@
+{"command":"openssl x509 -in /app/ssl/server.crt -noout -subject -dates -fingerprint sha256 > /app/ssl/verification.txt"}

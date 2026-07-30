@@ -1,0 +1,1 @@
+{"-i":"True","path":"/testbed","pattern":"test.*validator.*username|username.*validator.*test","target":"files"}

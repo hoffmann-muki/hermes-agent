@@ -1,0 +1,1 @@
+{"command":"find /testbed/astropy/io -name \"test*.py\" -type f | grep -E \"(fits|votable)\""}

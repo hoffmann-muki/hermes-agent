@@ -1,0 +1,1 @@
+{"output": "Testing registry.identify_format with bububu.ecsv...\nSuccess! Result: ['ascii.ecsv']\n\nTesting with test.fits...\nSuccess! Result: ['fits']", "exit_code": 0, "error": null}

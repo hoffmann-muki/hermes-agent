@@ -1,0 +1,6 @@
+Excellent! I can see some interesting strings in the binary. I notice:
+- "Access granted! Secret: %s" - this suggests the secret is printed with a format string
+- "ptrace" - anti-debugging mechanism
+- "Debugging detected! Access denied." - anti-debugging message
+
+Let me run the program and try different inputs to find the secret=<redacted:assignment>

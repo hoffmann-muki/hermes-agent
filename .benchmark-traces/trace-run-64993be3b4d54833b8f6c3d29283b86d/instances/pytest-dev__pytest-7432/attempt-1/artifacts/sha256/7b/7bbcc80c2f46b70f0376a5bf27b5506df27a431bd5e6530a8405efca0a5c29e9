@@ -1,0 +1,12 @@
+Now I see the issue! Look at lines 311-314 in reports.py:
+
+```python
+elif excinfo.errisinstance(skip.Exception):
+    outcome = "skipped"
+    r = excinfo._getreprcrash()
+    longrepr = (str(r.path), r.lineno, r.message)
+```
+
+When a skip exception is caught, it gets the location from `excinfo._getreprcrash()`, which will point to where the `skip()` function was called (which is in `skipping.py` line 239), not the actual test location.
+
+Now let's look back at the `pytest_runtest_makereport` hook in

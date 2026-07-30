@@ -1,0 +1,1 @@
+{"command":"cd /testbed && grep -r \"newline\\|\\\\\\\\n\\|\\\\\\\\r\" tests/auth_tests/test_validators.py"}

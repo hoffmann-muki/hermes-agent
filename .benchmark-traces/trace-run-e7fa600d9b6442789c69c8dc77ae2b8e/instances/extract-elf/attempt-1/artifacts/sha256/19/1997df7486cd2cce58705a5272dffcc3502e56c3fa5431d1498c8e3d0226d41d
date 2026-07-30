@@ -1,0 +1,1 @@
+Now I understand the binary structure. Let me write a Python script to parse the ELF and extract memory values from the appropriate sections (likely .data and .bss sections).

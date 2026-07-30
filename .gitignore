@@ -74,6 +74,8 @@ ignored/
 environments/benchmarks/evals/
 .benchmark-runs/
 .benchmark-traces/
+!.benchmark-traces/
+!.benchmark-traces/**
 
 # Web UI build output
 hermes_cli/web_dist/

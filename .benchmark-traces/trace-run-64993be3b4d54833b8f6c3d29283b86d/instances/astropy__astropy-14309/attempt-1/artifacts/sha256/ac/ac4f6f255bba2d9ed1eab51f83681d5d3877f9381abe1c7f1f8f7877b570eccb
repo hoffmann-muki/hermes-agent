@@ -1,0 +1,1 @@
+{"command":"cd /testbed && python -c \"from astropy.io.registry import identify_format; from astropy.table import Table; result = identify_format('write', Table, 'bububu.ecsv', None, [], {}); print('Result:', result)\""}

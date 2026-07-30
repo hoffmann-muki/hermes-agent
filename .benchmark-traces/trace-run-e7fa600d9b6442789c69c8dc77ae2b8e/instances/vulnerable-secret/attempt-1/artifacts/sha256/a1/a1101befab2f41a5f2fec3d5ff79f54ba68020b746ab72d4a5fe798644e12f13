@@ -1,0 +1,1 @@
+{"command":"printf \"AAAA%s%s%s%s%s%s%s%s%s%s\" | /app/vulnerable"}

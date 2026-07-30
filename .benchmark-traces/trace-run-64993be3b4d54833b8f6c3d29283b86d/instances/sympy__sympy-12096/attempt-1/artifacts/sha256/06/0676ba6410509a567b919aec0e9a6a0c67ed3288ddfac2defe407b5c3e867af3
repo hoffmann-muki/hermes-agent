@@ -1,0 +1,3 @@
+Perfect! Now I understand the issue completely. When `Float()` is called with a SymPy Expr that contains symbolic functions, it fails. The solution is to call `.evalf()` on the result of `self._imp_(*self.args)` before passing it to `Float()`.
+
+Now let me look at the existing tests to understand the expected behavior better:

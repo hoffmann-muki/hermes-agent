@@ -1,0 +1,1 @@
+{"output": "..\n----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nOK\nTesting against Django installed in '/testbed/django' with up to 20 processes\nSystem check identified no issues (0 silenced).", "exit_code": 0, "error": null}

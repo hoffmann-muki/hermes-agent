@@ -1,0 +1,1 @@
+{"output": "Testing identify_format with bububu.ecsv...\nError: AttributeError: type object 'Table' has no attribute 'identify_format'\n\nTesting is_fits with empty args...\nSuccess! Result: False\n\nTesting is_votable with empty args...\nSuccess! Result: False\n\nTesting is_hdf5 with empty args...\nSuccess! Result: False", "exit_code": 0, "error": null}

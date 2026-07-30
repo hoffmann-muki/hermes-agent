@@ -1,0 +1,1 @@
+Great! I've confirmed the issue. The problem is that when `interactive=True`, the xlim changes. Let me look at the ToolLineHandles class more closely:

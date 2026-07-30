@@ -1,0 +1,41 @@
+{
+  "complete": true,
+  "containerTls": {
+    "active": false,
+    "requested": false
+  },
+  "hostTls": {
+    "active": true,
+    "binaryPath": "/home/hoffmann_muki/.local/share/uv/python/cpython-3.13.14-linux-x86_64-gnu/bin/python3.13",
+    "requested": true
+  },
+  "sources": {
+    "host": {
+      "complete": true,
+      "diagnosticsByType": {},
+      "events": 368,
+      "eventsBySource": {
+        "diagnostic": 1,
+        "http_parser": 88,
+        "sse_processor": 41,
+        "ssl": 177,
+        "system": 61
+      },
+      "status": "completed",
+      "writeErrors": 0
+    },
+    "task-container": {
+      "complete": true,
+      "diagnosticsByType": {},
+      "events": 10982,
+      "eventsBySource": {
+        "diagnostic": 1,
+        "process": 10920,
+        "system": 61
+      },
+      "status": "completed",
+      "writeErrors": 0
+    }
+  },
+  "status": "completed"
+}

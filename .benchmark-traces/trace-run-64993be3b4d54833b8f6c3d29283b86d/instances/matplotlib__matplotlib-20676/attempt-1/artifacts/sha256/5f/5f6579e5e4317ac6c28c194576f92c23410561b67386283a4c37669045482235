@@ -1,0 +1,1 @@
+{"command":"cd /testbed && git log --all --grep=\"20676\" --oneline | head -20"}

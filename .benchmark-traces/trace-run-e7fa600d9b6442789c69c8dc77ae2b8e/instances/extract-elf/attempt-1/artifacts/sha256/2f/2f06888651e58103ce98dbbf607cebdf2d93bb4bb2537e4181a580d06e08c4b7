@@ -1,0 +1,1 @@
+{"command":"node /app/extract.js /app/a.out 2>&1 | head -100"}

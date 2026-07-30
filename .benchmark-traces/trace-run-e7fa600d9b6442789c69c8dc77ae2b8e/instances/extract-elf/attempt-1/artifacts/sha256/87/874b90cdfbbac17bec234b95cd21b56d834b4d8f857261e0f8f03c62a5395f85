@@ -1,0 +1,1 @@
+Now I can see the sections. The .data section is at addr=16384 with size=16 bytes, and .bss is at addr=16400 with size=8 bytes. But I notice there's also .rodata at addr=8192 with size=16 bytes. Let me check if there are more data sections and also look at the actual content:

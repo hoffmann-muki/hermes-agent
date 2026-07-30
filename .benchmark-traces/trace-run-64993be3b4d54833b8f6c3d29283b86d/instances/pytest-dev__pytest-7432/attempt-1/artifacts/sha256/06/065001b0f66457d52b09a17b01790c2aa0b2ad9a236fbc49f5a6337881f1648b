@@ -1,0 +1,1 @@
+{"content":"import pytest\n\n@pytest.mark.skip\ndef test_skip_location() -> None:\n    assert 0\n","path":"/testbed/test_skip_bug.py"}

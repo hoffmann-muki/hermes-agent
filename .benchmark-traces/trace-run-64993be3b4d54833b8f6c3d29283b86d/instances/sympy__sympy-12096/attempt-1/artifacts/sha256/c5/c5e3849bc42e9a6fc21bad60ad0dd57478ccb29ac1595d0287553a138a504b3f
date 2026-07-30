@@ -1,0 +1,1 @@
+{"command":"cd /testbed && grep -r \"f(g(\" sympy/core/tests/test_evalf.py"}

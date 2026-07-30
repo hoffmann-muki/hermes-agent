@@ -1,0 +1,15 @@
+## Summary
+
+**Changes Made:**
+- Modified `/testbed/django/contrib/auth/validators.py`
+- Changed regex in `ASCIIUsernameValidator` (line 10): `r'^[\w.@+-]+$'` → `r'\A[\w.@+-]+\Z'`
+- Changed regex in `UnicodeUsernameValidator` (line 20): `r'^[\w.@+-]+$'` → `r'\A[\w.@+-]+\Z'`
+
+**Verification:**
+- ✅ Both validators now use `\A` and `\Z` anchors instead of `^` and `$`
+- ✅ Trailing newlines are now correctly rejected (verified with test cases)
+- ✅ All existing Django tests pass (2/2 tests in UsernameValidatorsTests)
+- ✅ Valid usernames still pass validation
+- ✅ Invalid usernames with trailing newlines are now rejected
+
+**Residual Risk:** None - the fix is minimal, targeted, and addresses the exact security vulnerability described in the issue. The `\A` and `\Z` anchors provide absolute start/end matching that is not affected by trailing newlines.

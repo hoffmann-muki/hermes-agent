@@ -1,0 +1,39 @@
+Now I can see the issue! Let me analyze the `pytest_runtest_makereport` hook (lines 261-305). The problem is in the logic at lines 273-274 and 294-305.
+
+When `--runxfail` is set:
+- Line 273-274: If `runxfail` is True, it just passes and doesn't handle xfail
+- But the issue is that the skip location handling at lines 294-305 is only executed when `rep.skipped` is True
+
+The problem is that when `--runxfail` is used, the code at lines 294-305 that fixes the skip location is still executed, BUT the condition at line 295 checks `item._store.get(skipped_by_mark_key, True)`. 
+
+However, looking more carefully: when `--runxfail` is True, the code at line 273-274 does `pass`, which means it doesn't set up the xfail handling. But the skip location fix at lines 294-305 should still work...
+
+Wait, let me trace through what happens:
+1. When `@pytest.mark.skip` is used, `skipped_by_mark_key` is set to True in `pytest_runtest_setup` (line 238)
+2. The skip happens at line 239 via `skip(skipped.reason)`
+3. In `pytest_runtest_makereport`, when `call.excinfo.value` is a `skip.Exception`, the test is marked as skipped
+4. The condition at line 294-305 should fix the location
+
+The bug is at line 295: it checks `item._store.get(skipped_by_mark_key, True)`. When `skipped_by_mark_key` is not in the store, it defaults to `True`. But the real issue is that when `--runxfail` is used, something is different...
+
+Let me look at the condition more carefully. The issue is that the skip location fix (lines 294-305) only applies when:
+1. `item._store.get(skipped_by_mark_key, True)` is True
+2. `rep.skipped` is True  
+3. `type(rep.longrepr) is tuple`
+
+But when `--runxfail` is used, the skip might not go through this path. Let me check what happens with skip exceptions...
+
+Actually, I think I found it! Look at lines 273-278:
+```python
+elif item.config.option.runxfail:
+    pass  # don't interfere
+elif call.excinfo and isinstance(call.excinfo.value, xfail.Exception):
+```
+
+The problem is that when `--runxfail` is set, the code at line 273-274 just passes, but it should still handle skip exceptions! The skip exception handling should happen regardless of `--runxfail`.
+
+But wait, skip exceptions are different from xfail exceptions. Let me re-read...
+
+Actually, I think the real issue is different. Let me check if skip exceptions are being handled. Looking at the code, when a skip is raised, it should be caught and handled. But the condition at line 294-305 is checking for `rep.skipped` which should be True.
+
+Let me search for how skip is handled:

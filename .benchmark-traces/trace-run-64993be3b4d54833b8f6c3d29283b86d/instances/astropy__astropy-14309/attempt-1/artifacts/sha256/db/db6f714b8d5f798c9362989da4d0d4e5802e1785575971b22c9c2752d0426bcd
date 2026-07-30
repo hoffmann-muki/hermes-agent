@@ -1,0 +1,1 @@
+{"total_count": 2, "matches": [{"path": "/testbed/astropy/io/registry/tests/test_registries.py", "line": 212, "content": "    def test_identify_format(self, registry, fmtcls1):"}, {"path": "/testbed/astropy/io/registry/tests/test_registries.py", "line": 262, "content": "    def test_compat_identify_format(self, registry, fmtcls1):"}]}

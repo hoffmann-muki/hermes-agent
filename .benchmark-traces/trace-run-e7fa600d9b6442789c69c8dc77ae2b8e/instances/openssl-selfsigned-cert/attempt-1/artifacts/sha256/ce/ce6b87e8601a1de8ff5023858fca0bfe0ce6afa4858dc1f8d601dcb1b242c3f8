@@ -1,0 +1,1 @@
+{"output": "total 24\ndrwxr-xr-x 2 root root 4096 Jul 28 01:32 .\ndrwxr-xr-x 1 root root 4096 Jul 28 01:32 ..\n-rw-r--r-- 1 root root 1220 Jul 28 01:32 server.crt\n-rw------- 1 root root 1704 Jul 28 01:32 server.key\n-rw-r--r-- 1 root root 2924 Jul 28 01:32 server.pem\n-rw-r--r-- 1 root root  203 Jul 28 01:32 verification.txt", "exit_code": 0, "error": null}

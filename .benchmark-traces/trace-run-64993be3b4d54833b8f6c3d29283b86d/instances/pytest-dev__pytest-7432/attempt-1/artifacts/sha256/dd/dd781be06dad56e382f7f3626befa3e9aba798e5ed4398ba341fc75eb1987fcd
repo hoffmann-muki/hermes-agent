@@ -1,0 +1,8 @@
+Now let me look at the order of hook execution. The hooks have `tryfirst=True` or are `hookwrapper`. Let me check the hookimpl decorators:
+
+In skipping.py line 232: `@hookimpl(tryfirst=True)` for `pytest_runtest_setup`
+In skipping.py line 247: `@hookwrapper=True` for `pytest_runtest_call`
+In skipping.py line 261: `@hookwrapper=True` for `pytest_runtest_makereport`
+
+In runner.py line 312: No decorator (default), which means it's not tryfirst
+In unittest.py line 291: `@hookimpl(tryfirst=True)` for

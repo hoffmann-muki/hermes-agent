@@ -1,0 +1,9 @@
+Perfect! Now I understand the issue. When `f(g(2)).evalf()` is called:
+
+1. `f._eval_evalf()` is invoked
+2. It calls `self._imp_(*self.args)` which is `f._imp_(g(2))`
+3. The implementation of `f` is `lambda x: x ** 2`, so it returns `g(2) ** 2`
+4. This is a symbolic expression (Pow), not a numeric value
+5. The current code just wraps this in `Float(...)` without recursively calling evalf
+
+The fix should be to call `.evalf()` on the result of `self._imp_(*self.args)` if it's a SymPy expression. Le

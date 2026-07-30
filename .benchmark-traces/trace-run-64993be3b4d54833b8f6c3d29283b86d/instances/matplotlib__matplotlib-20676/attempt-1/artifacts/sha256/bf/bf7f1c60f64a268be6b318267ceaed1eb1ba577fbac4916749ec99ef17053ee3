@@ -1,0 +1,1 @@
+Interesting! So `axvline` itself doesn't affect the limits. Let me check what happens during the initialization of ToolLineHandles in the context of SpanSelector:

@@ -1,0 +1,8 @@
+Done! Your changes have been successfully merged into master. 
+
+**Summary:**
+- Your "Move to Stanford" commit (`c499730`) was found in the reflog but not in master
+- I merged it into master, resolving a conflict in `_includes/about.md` by keeping your Stanford update
+- The merge is now part of your master branch history
+
+Your changes are now back in master. The about section now reads "I am a Postdoctoral Researcher at Stanford CS."

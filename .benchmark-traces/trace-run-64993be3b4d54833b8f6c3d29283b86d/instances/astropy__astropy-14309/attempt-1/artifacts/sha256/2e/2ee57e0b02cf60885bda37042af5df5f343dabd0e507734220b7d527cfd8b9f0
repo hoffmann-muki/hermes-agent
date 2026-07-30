@@ -1,0 +1,1 @@
+{"command":"cd /testbed && git log --oneline --all -- astropy/io/fits/connect.py | head -20"}

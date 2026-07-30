@@ -1,0 +1,1 @@
+Now I can see this is an ELF binary. Let me use Python to parse the ELF structure and extract the relevant memory values from the appropriate sections.

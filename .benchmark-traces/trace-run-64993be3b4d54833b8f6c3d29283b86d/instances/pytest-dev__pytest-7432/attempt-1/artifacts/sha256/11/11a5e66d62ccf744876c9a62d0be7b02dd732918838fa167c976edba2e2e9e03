@@ -1,0 +1,18 @@
+So `Skipped` and `XFailed` are separate exception classes. Now let me check if `Skipped` is a subclass of `xfail.Exception`:
+
+Looking at the code, `xfail.Exception` would be `XFailed` (from the `_with_exception` decorator). So `Skipped` is not a subclass of `XFailed`.
+
+Now let me trace through the logic again. When `@pytest.mark.skip` is used with `--runxfail`:
+
+1. `pytest_runtest_setup` calls `skip(skipped.reason)` which raises `Skipped` exception
+2. The exception is caught and wrapped in `CallInfo` with `excinfo`
+3. `pytest_runtest_makereport` is called as a hookwrapper
+4. `yield` returns a report with `outcome="skipped"` and `longrepr` pointing to the skip location
+5. Line 273-274: Since `runxfail` is True, it does `pass`
+6. Line 275: `call.excinfo` is not None, but `call.excinfo.value` is `Skipped`, not `xfail.Exception`, so this condition is False
+7. Line 279: `not rep.skipped` is False (because `rep.skipped` is True), so this condition is False
+8. Line 294: This condition should be True and the skip location fix should be applied!
+
+So the skip location fix should be applied. But it's not working! Let me check if there's something else going on...
+
+Wait, let me check if the skip location fix is actually modifying the report. Let me add some debug output:

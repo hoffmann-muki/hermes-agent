@@ -1,0 +1,5 @@
+## Summary
+
+**What was done:**
+- Modified `/testbed/django/contrib/auth/validators.py` to fix the UsernameValidator issue
+- Changed the regex pattern in both va

@@ -1,0 +1,1 @@
+{"total_count": 1, "matches": [{"path": "/testbed/src/_pytest/outcomes.py", "line": 54, "content": "class Skipped(OutcomeException):"}]}

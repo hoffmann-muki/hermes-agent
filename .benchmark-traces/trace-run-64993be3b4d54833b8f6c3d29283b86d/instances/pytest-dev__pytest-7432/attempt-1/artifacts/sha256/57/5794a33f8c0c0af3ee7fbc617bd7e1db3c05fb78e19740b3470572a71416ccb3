@@ -1,0 +1,1 @@
+{"-i":"True","output_mode":"content","path":"/testbed/testing","pattern":"runxfail.*skip|skip.*runxfail"}

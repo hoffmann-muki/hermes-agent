@@ -1,0 +1,12 @@
+All tasks completed successfully. Let me provide a final summary:
+
+## Self-Signed TLS Certificate Created Successfully
+
+All files have been created with the correct format and permissions:
+
+| File | Purpose | Permissions |
+|------|---------|-------------|
+| `/app/ssl/server.key` | 2048-bit RSA private key | 600 (rw-------) |
+| `/app/ssl/server.crt` | Self-signed certificate | 644 (rw-r--r--) |
+| `/app/ssl/server.pem` | Combined key + certificate | 644 (rw-r--r--) |
+| `/app/ssl/verification.txt` 

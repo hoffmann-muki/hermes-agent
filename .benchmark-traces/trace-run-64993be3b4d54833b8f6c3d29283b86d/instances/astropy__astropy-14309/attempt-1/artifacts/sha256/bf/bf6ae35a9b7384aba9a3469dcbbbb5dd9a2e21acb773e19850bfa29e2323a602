@@ -1,0 +1,1 @@
+The tests show that the fixes work correctly for `is_fits` and `is_votable`. Let

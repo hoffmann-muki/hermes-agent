@@ -1,0 +1,1 @@
+{"output": "./bench/skip.py\n./src/_pytest/skipping.py\n./testing/test_skipping.py\n./testing/example_scripts/unittest/test_setup_skip.py\n./testing/example_scripts/unittest/test_setup_skip_module.py\n./testing/example_scripts/unittest/test_setup_skip_class.py", "exit_code": 0, "error": null}

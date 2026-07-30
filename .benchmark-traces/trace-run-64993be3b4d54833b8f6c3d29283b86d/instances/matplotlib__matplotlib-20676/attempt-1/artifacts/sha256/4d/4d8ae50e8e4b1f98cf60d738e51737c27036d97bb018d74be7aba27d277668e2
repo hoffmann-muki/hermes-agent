@@ -1,0 +1,1 @@
+Now let me look at the _get_data method in the base class and see if there's an issue with how it clips data:

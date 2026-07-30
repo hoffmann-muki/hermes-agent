@@ -1,0 +1,5 @@
+Wait, I realize the issue. The `.*?` is non-greedy, so it will match the minimum characters needed to find a date. But I need the LAST date. The key insight is that I need to match everything up to the last date, which means I need to match any characters (including other dates) but then ensure I'm at the last one.
+
+Actually, I think I need to reconsider the entire approach. Let me think about what `re.findall` does with MULTILINE:
+
+1. It finds all non-overlapping matches of the pattern in the t

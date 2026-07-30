@@ -1,0 +1,1 @@
+Interesting! So in the simple case, `_imp_` returns a plain Python int (4), but in the nested case it returns a SymPy Expr (g(2)**2). Let me check what happens when we pass these to Float:

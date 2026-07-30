@@ -1,0 +1,1 @@
+{"command":"find /testbed/tests -name \"settings*.py\" | head -5"}

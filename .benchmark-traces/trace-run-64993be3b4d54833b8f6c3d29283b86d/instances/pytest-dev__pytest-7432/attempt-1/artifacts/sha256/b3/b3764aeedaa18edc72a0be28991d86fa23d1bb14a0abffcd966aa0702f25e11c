@@ -1,0 +1,23 @@
+Now I see the issue! Look at lines 311-314 in reports.py:
+
+```python
+elif excinfo.errisinstance(skip.Exception):
+    outcome = "skipped"
+    r = excinfo._getreprcrash()
+    longrepr = (str(r.path), r.lineno, r.message)
+```
+
+When a skip exception is caught, it gets the location from `excinfo._getreprcrash()`, which will point to where the `skip()` function was called (which is in `skipping.py` line 239), not the actual test location.
+
+Now let's look back at the `pytest_runtest_makereport` hook in skipping.py (lines 261-305). The issue is that when `--runxfail` is set, the code at lines 273-274 just passes, but then the skip location fix at lines 294-305 should still apply...
+
+Wait, let me trace through the logic more carefully. The problem is that the skip location fix at lines 294-305 only applies when:
+1. `item._store.get(skipped_by_mark_key, True)` is True
+2. `rep.skipped` is True
+3. `type(rep.longrepr) is tuple`
+
+But the issue is that when `--runxfail` is used, the `skip.Exception` is still raised, and it's caught in `TestReport.from_item_and_call` at line 311. This sets `longrepr` to the crash location (which is in skipping.py).
+
+Then, in the `pytest_runtest_makereport` hook in skipping.py, the condition at line 294-305 should fix this. But let me check if `rep.skipped` is True at that point...
+
+Actually, I think I need to understand the flow better. Let me check if there are multiple `pytest_runtest_makereport` hooks:

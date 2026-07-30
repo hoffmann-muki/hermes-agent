@@ -1,0 +1,1 @@
+{"command":"grep -n \"interactive\" /testbed/lib/matplotlib/tests/test_widgets.py | head -30"}

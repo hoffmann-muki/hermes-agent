@@ -1,0 +1,73 @@
+I've identified the issue and understand the problem completely:
+
+## Issue Analysis
+
+**Problem**: In `Function._eval_evalf()` (line 510 of `/testbed/sympy/core/function.py`), when `self._imp_(*self.args)` returns a SymPy Expr (like `g(2)**2` from a nested call), the code tries to pass this directly to `Float()`, which fails because `Float()` cannot handle symbolic expressions.
+
+**Root Cause**: The implementation doesn't recursively call `.evalf()` on the result when it's a SymPy expression that needs evaluation.
+
+**Evidence from my tests**:
+- Simple case: `f(2).evalf()` works because `_imp_(2)` returns `4` (int)
+- Nested case: `f(g(2)).evalf()` fails because `_imp_(g(2))` returns `g(2)**2` (Expr)
+- `Float(g(2)**2, 15)` raises: "cannot create mpf from g(2)**2"
+- `Float((g(2)**2).evalf(), 15)` works and returns `16.0`
+
+## Solution
+
+The fix should be on line 510 of `/testbed/sympy/core/function.py`:
+- After calling `self._imp_(*self.args)`, check if the result is a SymPy Expr
+- If it is, call `.evalf()` on it before passing to `Float()`
+- Or more simply, call `.evalf()` first to handle both numeric and symbolic cases
+
+Let me now delegate to the three specialized agents as required by the benchmark protocol.
+
+## Delegation to Navigator Agent
+
+I'll now use the native `delegate_task` tool to delegate to a navigator agent.
+
+<tool_call>
+<function=delegate_task>
+<parameter=goal>
+[benchmark-navigator] Investigate the evalf recursive issue with implemented_function in SymPy
+
+## Context
+This is a SWE-bench Verified task for the SymPy repository at /testbed.
+Base commit: d7c3045115693e887bcd03599b7ca4650ac5f2cb
+Issue: sympy__sympy-12096
+Difficulty: <15 min fix
+
+## Problem Statement
+The issue is in `Function._eval_evalf()` method in `/testbed/sympy/core/function.py` at line 510. When evaluating compositions of `implemented_function`s, the method doesn't recursively call evalf on the return value from `_imp_()`.
+
+Example:
+```python
+from sympy.utilities.lambdify import implemented_function
+f = implemented_function('f', lambda x: x ** 2)
+g = implemented_function('g', lambda x: 2 * x)
+f(2).evalf()      # Works: 4.0
+g(2).evalf()      # Works: 4.0
+f(g(2)).evalf()   # BROKEN: returns f(g(2)) instead of 16.0
+```
+
+## Your Task
+1. Read `/testbed/sympy/core/function.py` lines 500-512 to understand the current `_eval_evalf` implementation
+2. Read `/testbed/sympy/core/tests/test_evalf.py` to see existing evalf tests
+3. Search for how other parts of SymPy handle recursive evalf calls
+4. Check what types can be returned from `_imp_()` (int, float, Expr, etc.)
+5. Determine the best fix that:
+   - Handles numeric returns (int, float) without breaking
+   - Handles Expr returns by recursively calling evalf
+   - Maintains backward compatibility
+6. Return a detailed evidence-based plan with:
+   - Current behavior analysis
+   - Required changes to the code
+   - Test cases to verify the fix
+   - Any edge cases to consider
+
+Do NOT implement the fix yet. Just investigate and return your findings with a concrete plan.
+</parameter>
+<parameter=role>
+leaf
+</parameter>
+</function>
+</tool_call>

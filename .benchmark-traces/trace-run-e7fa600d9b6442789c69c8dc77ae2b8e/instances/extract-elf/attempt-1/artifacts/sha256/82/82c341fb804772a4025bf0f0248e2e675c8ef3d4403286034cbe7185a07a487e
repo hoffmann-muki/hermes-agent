@@ -1,0 +1,6 @@
+Now I can see the data. Looking at the binary, I see:
+- .rodata at offset 8192 (0x2000) contains "Hello world" string
+- .data at offset 12288 (0x3000) contains some data
+- .bss at offset 12304 (0x3010) is uninitialized
+
+Let me look more carefully at the actual data sections. The .data section starts at offset 12288 and has size 16 bytes. Let me check what's there:

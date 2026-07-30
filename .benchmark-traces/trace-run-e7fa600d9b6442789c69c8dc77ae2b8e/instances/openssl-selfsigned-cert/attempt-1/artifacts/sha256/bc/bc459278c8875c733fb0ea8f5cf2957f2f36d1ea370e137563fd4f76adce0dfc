@@ -1,0 +1,5 @@
+## Investigation Results
+
+**Current State:**
+- `/app/` directory is **empty** (only contains `.` and `..`)
+- **OpenSSL 3.0.20** is installed and available at `/

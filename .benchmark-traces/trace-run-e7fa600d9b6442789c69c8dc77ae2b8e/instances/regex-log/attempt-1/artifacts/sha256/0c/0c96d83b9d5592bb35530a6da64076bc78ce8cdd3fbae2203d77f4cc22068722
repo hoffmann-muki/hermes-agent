@@ -1,0 +1,5 @@
+Wait, I need to reconsider. The problem is that `.*?` is non-greedy and will match as little as possible, which means it will find the first date, not the last. I need to match the LAST date in the line.
+
+The key insight is: to match the last date in a line, I need to match everything up to that date, where after that date there are no more dates. So I need to use a pattern that matches any characters (including dates) followed by the last date.
+
+Actually, the issue is more subtle. With `re.find

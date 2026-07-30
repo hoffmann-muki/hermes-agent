@@ -1,0 +1,1 @@
+{"output": "Unable to decode the command from the command line:\nUnicodeEncodeError: 'utf-8' codec can't encode characters in position 813-815: surrogates not allowed", "exit_code": 1, "error": null}

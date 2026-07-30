@@ -1,0 +1,1 @@
+{"file_glob":"*.py","path":"/testbed","pattern":"test.*is_fits|test.*is_votable|test.*is_hdf5"}

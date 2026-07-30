@@ -1,0 +1,1 @@
+{"command":"cd /testbed && python -m django test auth_tests.test_validators.UsernameValidatorsTests --settings=django.conf.settings"}

@@ -1,0 +1,8 @@
+## Summary
+
+I've successfully fixed the IndexError bug in all three identifier functions:
+
+### Changes Made:
+
+1. **astropy/io/fits/connect.py line 72**
+   - Cha

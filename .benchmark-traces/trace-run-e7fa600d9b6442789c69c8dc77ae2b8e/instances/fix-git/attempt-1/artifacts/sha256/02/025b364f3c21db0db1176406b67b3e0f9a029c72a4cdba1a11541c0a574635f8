@@ -1,0 +1,3 @@
+I can see the merge conflict. The current master (HEAD) has the older content about University of Washington, while your commit `c499730` has the updated content about Stanford.
+
+Since you said you "just made some changes" and checked out master, and you want to find those changes, I'll resolve this by keeping your Stanford update (from commit c499730) since that appears to be your most recent work:

@@ -1,0 +1,1 @@
+{"total_count": 1, "matches": [{"path": "/testbed/sympy/utilities/lambdify.py", "line": 653, "content": "def implemented_function(symfunc, implementation):"}]}

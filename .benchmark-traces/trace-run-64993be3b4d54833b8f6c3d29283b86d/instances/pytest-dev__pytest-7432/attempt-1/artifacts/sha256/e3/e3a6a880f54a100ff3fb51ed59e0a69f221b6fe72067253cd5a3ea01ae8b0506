@@ -1,0 +1,8 @@
+Now I understand the issue! When `--runxfail` is set:
+- Line 273-274: The code does `pass` and doesn't interfere
+- But the skip location fix at lines 294-305 should still apply...
+
+Wait, let me check if the condition at line 294-298 is even reached. The issue is that when `--runxfail` is set, the code at line 273-274 does `pass`, which means it doesn't handle xfail. But then the code continues to line 294...
+
+Actually, I think I see the problem now! The condition at line 294-298 checks:
+1. `item

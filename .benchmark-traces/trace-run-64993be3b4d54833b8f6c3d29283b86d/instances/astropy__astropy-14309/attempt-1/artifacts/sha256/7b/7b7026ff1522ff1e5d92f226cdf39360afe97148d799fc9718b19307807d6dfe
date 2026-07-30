@@ -1,0 +1,1 @@
+{"output": "Test 1: Empty args\n  PASSED: All functions return False with empty args\nTest 2: Non-matching types\n  PASSED: All functions return False for non-matching types\nTest 3: Matching types\n  PASSED: All functions return True for matching types\n\nAll tests passed! The IndexError fix is working correctly.", "exit_code": 0, "error": null}

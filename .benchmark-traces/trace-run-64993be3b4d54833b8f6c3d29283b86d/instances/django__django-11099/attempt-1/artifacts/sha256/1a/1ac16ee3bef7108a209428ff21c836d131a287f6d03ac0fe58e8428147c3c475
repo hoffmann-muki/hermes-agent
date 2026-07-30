@@ -1,0 +1,6 @@
+## Summary
+
+**Verified the UsernameValidator fix successfully:**
+
+✅ **Both validators updated correctly:**
+- `ASCIIUsernameValidator` (line 10): `r'\A[\w.@+-]+\

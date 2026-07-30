@@ -1,0 +1,1 @@
+{"output": "Initial xlim: (9.5, 20.5)\nAfter axvline(12) with visible=False: (9.5, 20.5)\nAfter axvline(18) with visible=True: (9.5, 20.5)\nAfter axvline(15) then set_visible(False): (9.5, 20.5)", "exit_code": 0, "error": null}

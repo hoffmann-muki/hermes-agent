@@ -1,0 +1,1 @@
+{"command":"cd /testbed && find . -type f -name \"*.py\" | grep -E \"(skipping|skip)\" | head -20"}

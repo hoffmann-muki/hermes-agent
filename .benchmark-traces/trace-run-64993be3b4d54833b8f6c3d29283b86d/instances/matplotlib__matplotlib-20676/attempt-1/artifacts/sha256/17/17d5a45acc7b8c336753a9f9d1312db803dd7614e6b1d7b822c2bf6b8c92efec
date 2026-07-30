@@ -1,0 +1,45 @@
+I need to continue investigating the issue. Let me check what happens when the extents are set to (0, 1) initially:
+
+<tool_call>
+<function=write_file>
+<parameter=path>
+/testbed/test_extents.py
+</parameter>
+<parameter=content>
+"""Test what happens when extents are set."""
+import matplotlib
+matplotlib.use('Agg')
+from matplotlib import pyplot as plt
+from matplotlib.widgets import ToolLineHandles
+
+# Test with initial extents
+fig, ax = plt.subplots()
+ax.plot([10, 20], [10, 20])
+initial_xlim = ax.get_xlim()
+print(f"Initial xlim: {initial_xlim}")
+
+# Simulate what happens in SpanSelector.__init__
+# First, new_axes creates the rectangle with (0, 0) size
+# Then _setup_edge_handle is called with self.extents
+
+# Let's check what self.extents returns initially
+from matplotlib.widgets import SpanSelector
+
+class DebugSpanSelector(SpanSelector):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        print(f"After super().__init__, extents: {self.extents}")
+        if self._interactive:
+            print(f"Before _setup_edge_handle, xlim: {ax.get_xlim()}")
+            self._setup_edge_handle({'color': 'r'})
+            print(f"After _setup_edge_handle, xlim: {ax.get_xlim()}")
+            print(f"Edge handles positions: {self._edge_handles.positions}")
+
+ss = DebugSpanSelector(ax, print, "horizontal", interactive=True)
+final_xlim = ax.get_xlim()
+print(f"Final xlim: {final_xlim}")
+plt.close(fig)
+
+</parameter>
+</function>
+</tool_call>

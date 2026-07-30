@@ -1,0 +1,1 @@
+{"total_count": 1, "matches": [{"path": "/testbed/astropy/io/registry/base.py", "line": 282, "content": "    def identify_format(self, origin, data_class_required, path, fileobj, args, kwargs):"}]}

@@ -1,0 +1,1 @@
+{"command":"strings /app/vulnerable | head -100"}

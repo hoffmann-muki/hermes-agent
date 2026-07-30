@@ -1,0 +1,3 @@
+I found it! Looking at your reflog, you had committed changes at `c499730` (with the message "Move to Stanford") and were on that commit, but then you checked out master. The commit `c499730` is not in the current master branch history.
+
+Let me check what that commit contains and then merge it:

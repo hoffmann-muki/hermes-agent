@@ -1,0 +1,1 @@
+Now I can see the pattern. Both `is_votable` (line 42 in connect.py) and `is_hdf5` (line 60 in hdf5.py) also have the same issue - they access `args[0]` without checking if `args` is empty. Let me check the git history to understand what changed:

@@ -1,0 +1,3 @@
+Perfect! I've reproduced the bug. With `--runxfail`, the skip location shows `src/_pytest/skipping.py:239` instead of `test_skip_bug.py:3`.
+
+Now let me trace through the code to understand why. Let me add some debug output:

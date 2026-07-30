@@ -1,0 +1,12 @@
+I've identified the root cause of the issue! Let me analyze the code flow and provide the solution.
+
+## Root Cause Analysis
+
+The bug is in the `pytest_runtest_makereport` hook in `/testbed/src/_pytest/skipping.py`. When `--runxfail` is used:
+
+1. The `@pytest.mark.skip` marker causes `skip()` to be called in `pytest_runtest_setup` (line 239)
+2. This raises a `Skipped` exception which gets caught and the report is created with `longrepr` pointing to the skip location
+3. In `pytest_runtest_makereport`, when `runxfail=True`, the code at lines 273-274 just does `pass`
+4. **The issue**: The skip location fix code at lines 294-305 is only executed when `rep.longrepr` is a tuple, but when `--runxfail` is set, something prevents this code from running
+
+Let me check the actual flow more carefully by examining what happens:

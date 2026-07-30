@@ -1,0 +1,31 @@
+Wait, I realize the issue. The `.*?` is non-greedy, so it will match the minimum characters needed to find a date. But I need the LAST date. The key insight is that I need to match everything up to the last date, which means I need to match any characters (including other dates) but then ensure I'm at the last one.
+
+Actually, I think I need to reconsider the entire approach. Let me think about what `re.findall` does with MULTILINE:
+
+1. It finds all non-overlapping matches of the pattern in the text
+2. With MULTILINE, `^` matches at the start of each line and `$` matches at the end of each line
+
+So for each line, I need to match a pattern that captures the last date. The issue is that `.*?` will match the first date it encounters.
+
+The solution is to use a pattern that matches the last date by ensuring there are no more dates after it. But since we're using `$` at the end, and `.*?` is non-greedy, this won't work directly.
+
+Let me try a different approach: use `.*` (greedy) instead of `.*?`. This will match as much as possible, and then backtrack to find the last date that satisfies the pattern.
+
+Actually, I think the issue is that I need to match the last date in the line. The pattern should be:
+- `^` - start of line
+- `(?=.*IPv4)` - lookahead to ensure line contains IPv4
+- `.*` - match everything (greedy)
+- `date` - match a date
+- `$` - end of line
+
+But this would match the last date because `.*` is greedy and will consume as much as possible, then backtrack to find the last date.
+
+Wait, but `.*` is greedy and will match everything including dates. Then when it tries to match `date`, it will backtrack character by character until it finds a valid date pattern. So this should match the LAST date!
+
+Let me test this logic:
+- `.*` matches the entire line
+- Then it tries to match `date` at the end - fails
+- It backtracks one character and tries again - still fails
+- This continues until it finds a valid date pattern at some position
+
+So yes, `.*` (greedy) followed by `date` should match the last date in the line!

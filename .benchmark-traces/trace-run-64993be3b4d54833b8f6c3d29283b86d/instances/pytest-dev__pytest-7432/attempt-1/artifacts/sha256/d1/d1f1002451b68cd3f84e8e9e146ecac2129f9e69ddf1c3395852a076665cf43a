@@ -1,0 +1,7 @@
+Now I can see the issue! Let me analyze the `pytest_runtest_makereport` hook (lines 261-305). The problem is in the logic at lines 273-274 and 294-305.
+
+When `--runxfail` is set:
+- Line 273-274: If `runxfail` is True, it just passes and doesn't handle xfail
+- But the issue is that the skip location handling at lines 294-305 is only executed when `rep.skipped` is True
+
+The problem is that when `--runxfail` is used, the code at lines 294-305 that fixes the skip location is still executed, BUT the 

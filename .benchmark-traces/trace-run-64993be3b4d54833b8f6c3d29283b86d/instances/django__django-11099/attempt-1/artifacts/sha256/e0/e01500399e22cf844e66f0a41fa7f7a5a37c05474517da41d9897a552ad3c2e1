@@ -1,0 +1,1 @@
+{"command":"find /testbed -type f -name \"*.py\" -path \"*/tests/*\" | grep -i auth | head -20"}

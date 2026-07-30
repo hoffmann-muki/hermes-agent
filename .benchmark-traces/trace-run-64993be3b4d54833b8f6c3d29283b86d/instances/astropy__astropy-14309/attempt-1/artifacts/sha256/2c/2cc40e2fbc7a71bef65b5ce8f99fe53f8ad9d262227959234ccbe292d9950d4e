@@ -1,0 +1,1 @@
+{"mode":"replace","new_string":"    else:\n        return bool(args) and isinstance(args[0], (h5py.File, h5py.Group, h5py.Dataset))","old_string":"    else:\n        return isinstance(args[0], (h5py.File, h5py.Group, h5py.Dataset))","path":"/testbed/astropy/io/misc/hdf5.py"}

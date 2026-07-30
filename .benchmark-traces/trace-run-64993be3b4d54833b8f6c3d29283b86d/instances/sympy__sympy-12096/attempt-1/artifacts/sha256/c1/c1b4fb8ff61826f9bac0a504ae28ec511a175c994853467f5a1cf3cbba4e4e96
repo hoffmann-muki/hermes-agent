@@ -1,0 +1,1 @@
+Now let me understand the issue better. The problem is in the `_eval_evalf` method at line 510. When it calls `self._imp_(*self.args)`, it doesn't recursively call evalf on the result. Let me look at the full context of the _eval_evalf method:

@@ -1,0 +1,1 @@
+{"output": "ASCIIUsernameValidator regex class attribute: '\\\\A[\\\\w.@+-]+\\\\Z'\nUnicodeUsernameValidator regex class attribute: '\\\\A[\\\\w.@+-]+\\\\Z'\n\nBoth validators correctly use \\A (start) and \\Z (end) anchors instead of ^ and $\nThis prevents matching before trailing newlines.", "exit_code": 0, "error": null}

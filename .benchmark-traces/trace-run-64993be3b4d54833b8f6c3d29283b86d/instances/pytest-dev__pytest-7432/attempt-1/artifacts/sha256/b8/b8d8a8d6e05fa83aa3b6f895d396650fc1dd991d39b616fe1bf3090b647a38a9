@@ -1,0 +1,8 @@
+So `Skipped` and `XFailed` are separate exception classes. Now let me check if `Skipped` is a subclass of `xfail.Exception`:
+
+Looking at the code, `xfail.Exception` would be `XFailed` (from the `_with_exception` decorator). So `Skipped` is not a subclass of `XFailed`.
+
+Now let me trace through the logic again. When `@pytest.mark.skip` is used with `--runxfail`:
+
+1. `pytest_runtest_setup` calls `skip(skipped.reason)` which raises `Skipped` exception
+2. The exception is caught and wrapped in `Call

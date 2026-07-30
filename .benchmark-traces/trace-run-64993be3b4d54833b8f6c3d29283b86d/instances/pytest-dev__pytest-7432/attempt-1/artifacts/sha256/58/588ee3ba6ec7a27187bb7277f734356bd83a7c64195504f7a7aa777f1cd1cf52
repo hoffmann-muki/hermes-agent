@@ -1,0 +1,1 @@
+{"command":"find /testbed -name \"*.log\" -type f 2>/dev/null | head -20"}

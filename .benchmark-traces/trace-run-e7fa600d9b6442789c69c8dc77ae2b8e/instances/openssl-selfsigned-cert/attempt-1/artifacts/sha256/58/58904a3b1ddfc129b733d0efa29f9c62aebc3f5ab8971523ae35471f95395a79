@@ -1,0 +1,1 @@
+{"command":"cat /app/ssl/server.key /app/ssl/server.crt > /app/ssl/server.pem"}

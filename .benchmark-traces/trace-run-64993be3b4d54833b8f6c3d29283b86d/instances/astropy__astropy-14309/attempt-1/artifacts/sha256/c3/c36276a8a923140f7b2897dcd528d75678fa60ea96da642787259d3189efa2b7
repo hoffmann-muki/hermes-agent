@@ -1,0 +1,6 @@
+Let me run the relevant tests to ensure the fix doesn't break anything:
+
+<tool_call>
+<function=terminal>
+<parameter=command>
+cd /testbed && python -m pytest ast

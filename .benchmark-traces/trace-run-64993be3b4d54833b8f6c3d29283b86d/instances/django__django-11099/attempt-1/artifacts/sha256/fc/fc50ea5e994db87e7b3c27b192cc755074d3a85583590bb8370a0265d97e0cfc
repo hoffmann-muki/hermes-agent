@@ -1,0 +1,1 @@
+{"command":"cd /testbed && python -m pytest tests/auth_tests/test_validators.py::UsernameValidatorsTests -v"}

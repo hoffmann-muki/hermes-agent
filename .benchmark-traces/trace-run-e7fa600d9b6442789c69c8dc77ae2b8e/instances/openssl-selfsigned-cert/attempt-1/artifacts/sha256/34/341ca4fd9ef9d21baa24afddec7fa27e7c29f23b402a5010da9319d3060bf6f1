@@ -1,0 +1,1 @@
+{"command":"openssl x509 -in /app/ssl/server.crt -noout -text | head -20"}

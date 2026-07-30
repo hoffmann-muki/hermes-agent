@@ -1,0 +1,1 @@
+{"command":"cd /testbed && pip install h5py -q"}

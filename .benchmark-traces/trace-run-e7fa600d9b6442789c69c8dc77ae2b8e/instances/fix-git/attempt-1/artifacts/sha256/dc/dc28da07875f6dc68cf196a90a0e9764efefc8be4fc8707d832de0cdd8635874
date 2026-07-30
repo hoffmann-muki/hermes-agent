@@ -1,0 +1,1 @@
+{"command":"git log --all --oneline --graph -15"}

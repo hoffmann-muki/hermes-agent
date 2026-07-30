@@ -1,0 +1,1 @@
+I see! The issue is in the `ToolLineHandles.__init__` method. When it creates the lines with `ax.axvline(p, **line_props)`, the lines are created with `visible=False` (line 2367), but the issue is that `axvline` and `axhline` might be affecting the axis limits even when they're not visible. Let me check if this is the case:

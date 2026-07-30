@@ -1,0 +1,1 @@
+{"output": "Testing is_fits with empty args: False\nTesting is_votable with empty args: False\nTesting is_hdf5 with empty args: False\nTesting is_fits with HDUList: True\nTesting is_votable with VOTableFile: True\nTesting is_hdf5 with h5py.File: True\nAll tests passed!", "exit_code": 0, "error": null}

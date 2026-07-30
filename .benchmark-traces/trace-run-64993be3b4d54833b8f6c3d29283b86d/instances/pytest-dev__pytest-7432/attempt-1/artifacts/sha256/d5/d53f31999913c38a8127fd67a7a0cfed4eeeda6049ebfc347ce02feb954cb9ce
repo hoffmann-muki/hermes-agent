@@ -1,0 +1,28 @@
+Now I understand the issue! When `--runxfail` is set:
+- Line 273-274: The code does `pass` and doesn't interfere
+- But the skip location fix at lines 294-305 should still apply...
+
+Wait, let me check if the condition at line 294-298 is even reached. The issue is that when `--runxfail` is set, the code at line 273-274 does `pass`, which means it doesn't handle xfail. But then the code continues to line 294...
+
+Actually, I think I see the problem now! The condition at line 294-298 checks:
+1. `item._store.get(skipped_by_mark_key, True)` - should be True
+2. `rep.skipped` - should be True
+3. `type(rep.longrepr) is tuple` - should be True
+
+But wait, let me check if `rep.skipped` is True when `--runxfail` is set. Let me look at the TestReport.from_item_and_call code again:
+
+Looking at lines 311-314 in reports.py:
+```python
+elif excinfo.errisinstance(skip.Exception):
+    outcome = "skipped"
+    r = excinfo._getreprcrash()
+    longrepr = (str(r.path), r.lineno, r.message)
+```
+
+So when a skip exception is caught, it sets `outcome = "skipped"` and `longrepr` to the crash location. This should make `rep.skipped` True.
+
+But the issue is that the skip location fix at lines 294-305 in skipping.py should be executed. Let me check if there's something preventing it...
+
+Oh wait! I think I see it now. Let me check if the skip exception is actually a `skip.Exception` or a `Skipped` exception. Looking at outcomes.py, `skip()` raises a `Skipped` exception, not a `skip.Exception`.
+
+Let me check if `Skipped` is an alias or subclass of something:

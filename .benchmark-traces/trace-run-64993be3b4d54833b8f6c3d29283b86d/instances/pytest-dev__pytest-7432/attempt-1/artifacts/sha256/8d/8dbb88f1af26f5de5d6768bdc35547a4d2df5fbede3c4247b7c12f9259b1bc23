@@ -1,0 +1,5 @@
+So `skip()` raises a `Skipped` exception. Now let me check if `Skipped` has an `Exception` attribute:
+
+Looking at the `_with_exception` decorator at lines 98-104, it adds an `Exception` attribute to the function. So `skip.Exception` would be the `Skipped` class.
+
+Now let me check if `Skipped` is a subclass of `xfail.Exception` or something:

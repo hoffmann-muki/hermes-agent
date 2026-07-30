@@ -1,0 +1,3 @@
+Good! So `skipped` is a property that returns `True` when `outcome == "skipped"` (line 141).
+
+Now let me understand the flow better. Let me create a test to reproduce the issue:

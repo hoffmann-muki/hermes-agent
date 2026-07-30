@@ -1,0 +1,8 @@
+I found it! Looking at the data section at `404060`, there's encrypted/encoded data:
+```
+040e0305 39207624 2471301d 72347130
+242e7235 1d2f7631 3671301d 29713b1d
+70727076 3f42
+```
+
+And I noticed from the disassembly that there's XOR decryption with `0x42`. Let me decrypt this data:

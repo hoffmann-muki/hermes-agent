@@ -1,0 +1,1 @@
+{"command":"cd /testbed && python -m pytest astropy/io/misc/tests/test_hdf5.py -xvs 2>&1 | head -100"}

@@ -1,0 +1,11 @@
+## Summary
+
+**Changes Made:**
+- Modified `/testbed/django/contrib/auth/validators.py`
+- Changed regex in `ASCIIUsernameValidator` (line 10): `r'^[\w.@+-]+$'` → `r'\A[\w.@+-]+\Z'`
+- Changed regex in `UnicodeUsernameValidator` (line 20): `r'^[\w.@+-]+$'` → `r'\A[\w.@+-]+\Z'`
+
+**Verification:**
+- ✅ Both validators now use `\A` and `\Z` anchors instead of `^` and `$`
+- ✅ Trailing newlines are now correctly rejected (verified with test cases)
+- ✅ All existing Django tests pass (2/2 tests in UsernameV

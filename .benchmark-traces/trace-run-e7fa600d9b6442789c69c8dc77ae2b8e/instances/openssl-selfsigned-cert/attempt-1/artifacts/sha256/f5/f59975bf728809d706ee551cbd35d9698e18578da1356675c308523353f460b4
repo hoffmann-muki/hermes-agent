@@ -1,0 +1,1 @@
+{"command":"openssl req -x509 -new -key /app/ssl/server.key -out /app/ssl/server.crt -days 365 -subj \"/O=DevOps Team/CN=dev-internal.company.local\""}

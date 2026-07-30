@@ -1,0 +1,1 @@
+{"file_glob":"test_*.py","path":"/testbed/astropy/io","pattern":"conftest|test_connect"}

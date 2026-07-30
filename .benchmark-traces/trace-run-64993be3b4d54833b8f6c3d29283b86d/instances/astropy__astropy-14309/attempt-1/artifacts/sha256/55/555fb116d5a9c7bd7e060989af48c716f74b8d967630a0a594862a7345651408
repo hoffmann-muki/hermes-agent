@@ -1,0 +1,1 @@
+Perfect! Now I understand the issue completely. The commit simplified the code but didn't handle the case where `args` is empty. Let me now delegate to the patcher:

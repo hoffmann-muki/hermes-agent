@@ -1,0 +1,7 @@
+Based on my analysis of the binary, I can see it's a 64-bit ELF executable with the following relevant data sections:
+
+- `.rodata` at addr=8192, size=16 bytes - contains string data
+- `.data` at addr=16384, size=16 bytes - contains initialized data
+- `.bss` at addr=16400, size=8 bytes - uninitialized data
+
+The current script only extracts from `.data` and `.bss`, but it's missing the `.rodata` section which contains valuable data values. Let me update the script to include all read-only data sections and extract values properly.
