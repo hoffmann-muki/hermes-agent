@@ -285,7 +285,7 @@ _PATTERN_RULES = (
         "credential.private_key",
         re.compile(
             r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?"
-            r"-----END [A-Z0-9 ]*PRIVATE KEY-----",
+            r"(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
             re.DOTALL,
         ),
         "<redacted:private_key>",

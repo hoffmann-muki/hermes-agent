@@ -41,6 +41,7 @@ from hermes_cli.benchmarks.tracing.runtime import (
     NATIVE_CHUNK_MEDIA_TYPE,
     SCHEMA_DIGEST,
     TraceIdentity,
+    _Redactor,
 )
 
 
@@ -67,6 +68,16 @@ class _CustomHarness:
             instance_ids=("custom-instance",),
             strategy="explicit_ids",
         )
+
+
+def test_redactor_covers_private_keys_without_a_closing_boundary():
+    result = _Redactor().sanitize_text(
+        "-----BEGIN PRIVATE KEY-----\nsynthetic-truncated-payload"
+    )
+
+    assert result.value == "<redacted:private_key>"
+    assert result.matches == 1
+    assert result.rules == ("credential.private_key",)
 
 
 def _projection_event(
