@@ -49,8 +49,10 @@ def authorize_sudo(
         raise SudoAuthorizationError("sudo executable is not available")
 
     configured = effective_env.get("BENCHMARK_SUDO_PASSWORD_FILE", "").strip()
-    password_file = Path(configured).expanduser() if configured else (
-        DEFAULT_SUDO_PASSWORD_FILE.expanduser()
+    password_file = (
+        Path(configured).expanduser()
+        if configured
+        else (DEFAULT_SUDO_PASSWORD_FILE.expanduser())
     )
     timeout = _positive_float(
         effective_env.get("BENCHMARK_SUDO_TIMEOUT_SECONDS"),
@@ -103,13 +105,16 @@ def build_sudo_supervised_command(
     authorization: SudoAuthorization,
     command: Sequence[str],
     *,
+    owner_pid: int,
     stop_file: Path,
     stop_timeout: float,
 ) -> list[str]:
-    """Wrap a command in a root supervisor controlled by a credential-free file."""
+    """Wrap a command in a root supervisor bound to its unprivileged owner."""
 
     if not command:
         raise ValueError("sudo supervisor requires a command")
+    if owner_pid <= 0:
+        raise ValueError("sudo supervisor requires a positive owner PID")
     return [
         *authorization.command_prefix,
         sys.executable,
@@ -118,6 +123,7 @@ def build_sudo_supervised_command(
         "_supervise",
         str(stop_file),
         str(stop_timeout),
+        str(owner_pid),
         *command,
     ]
 
@@ -145,8 +151,13 @@ def authorized_sudo_stdin(
         secret.close()
 
 
-def _supervise(stop_file: Path, stop_timeout: float, command: Sequence[str]) -> int:
-    """Run one privileged child until its unprivileged owner requests shutdown."""
+def _supervise(
+    stop_file: Path,
+    stop_timeout: float,
+    owner_pid: int,
+    command: Sequence[str],
+) -> int:
+    """Run one privileged child while its unprivileged owner remains alive."""
 
     try:
         os.close(0)
@@ -167,9 +178,16 @@ def _supervise(stop_file: Path, stop_timeout: float, command: Sequence[str]) -> 
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
-        while process.poll() is None and not interrupted and not stop_file.exists():
+        while (
+            process.poll() is None
+            and not interrupted
+            and not stop_file.exists()
+            and _process_exists(owner_pid)
+        ):
             time.sleep(0.1)
-        requested_stop = interrupted or stop_file.exists()
+        requested_stop = (
+            interrupted or stop_file.exists() or not _process_exists(owner_pid)
+        )
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
             try:
@@ -183,15 +201,26 @@ def _supervise(stop_file: Path, stop_timeout: float, command: Sequence[str]) -> 
 
 
 def _main() -> int:
-    if len(sys.argv) < 5 or sys.argv[1] != "_supervise":
+    if len(sys.argv) < 6 or sys.argv[1] != "_supervise":
         return 64
     try:
         timeout = float(sys.argv[3])
+        owner_pid = int(sys.argv[4])
     except ValueError:
         return 64
-    if timeout <= 0:
+    if timeout <= 0 or owner_pid <= 0:
         return 64
-    return _supervise(Path(sys.argv[2]), timeout, sys.argv[4:])
+    return _supervise(Path(sys.argv[2]), timeout, owner_pid, sys.argv[5:])
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _open_password_file(path: Path) -> BinaryIO:
@@ -212,9 +241,7 @@ def _validate_password_file(secret: BinaryIO, path: Path) -> None:
             "sudo password file permissions must not grant group or other access"
         )
     if metadata.st_size <= 0 or metadata.st_size > 4096:
-        raise SudoAuthorizationError(
-            f"sudo password file has an invalid size: {path}"
-        )
+        raise SudoAuthorizationError(f"sudo password file has an invalid size: {path}")
 
 
 def _run_sudo_validation(

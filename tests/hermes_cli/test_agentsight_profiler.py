@@ -74,6 +74,7 @@ def test_host_collector_can_run_under_validated_sudo(tmp_path: Path) -> None:
             method="sudo-cache",
         ),
         collector,
+        owner_pid=os.getpid(),
         stop_file=tmp_path / "stop",
         stop_timeout=15,
     )
@@ -162,6 +163,7 @@ def test_supervisor_command_contains_no_password(
     command = build_sudo_supervised_command(
         authorization,
         ["/usr/local/bin/agentsight", "record"],
+        owner_pid=os.getpid(),
         stop_file=tmp_path / "stop",
         stop_timeout=15,
     )
@@ -180,6 +182,7 @@ def test_supervisor_stops_child_via_private_marker(tmp_path: Path) -> None:
         "_supervise",
         str(stop_file),
         "1",
+        str(os.getpid()),
         privileges.sys.executable,
         "-c",
         "import time; time.sleep(30)",
@@ -188,6 +191,24 @@ def test_supervisor_stops_child_via_private_marker(tmp_path: Path) -> None:
 
     assert process.wait(timeout=3) == 0
     assert not stop_file.exists()
+
+
+def test_supervisor_stops_child_when_owner_exits(tmp_path: Path) -> None:
+    owner = subprocess.Popen(["/bin/sleep", "0.2"])
+    process = subprocess.Popen([
+        privileges.sys.executable,
+        "-S",
+        str(Path(privileges.__file__).resolve()),
+        "_supervise",
+        str(tmp_path / "stop"),
+        "1",
+        str(owner.pid),
+        "/bin/sleep",
+        "30",
+    ])
+
+    assert owner.wait(timeout=3) == 0
+    assert process.wait(timeout=3) == 0
 
 
 def test_sudo_password_file_rejects_broad_permissions(
