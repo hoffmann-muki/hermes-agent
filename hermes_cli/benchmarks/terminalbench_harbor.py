@@ -16,6 +16,11 @@ from harbor.agents.installed.hermes import Hermes
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from hermes_cli.benchmarks.harbor_secrets import (
+    remove_secret_environment,
+    source_secret_environment,
+    stage_secret_environment,
+)
 from hermes_cli.benchmarks.tracing.agentsight import AgentSightProfiler
 from hermes_cli.benchmarks.tracing.harbor import (
     HarborTraceAttempt,
@@ -188,7 +193,6 @@ class BenchmarkHermes(Hermes):
             "HERMES_BENCHMARK_AGENT_TOPOLOGY": self._agent_topology,
             "HERMES_BENCHMARK_MODEL": self.model_name.removeprefix("openrouter/"),
             "HERMES_HOME": "/tmp/hermes",
-            "OPENROUTER_API_KEY": api_key,
         }
         if self._trace_attempt is not None:
             if (
@@ -218,18 +222,13 @@ class BenchmarkHermes(Hermes):
                 },
                 separators=(",", ":"),
             )
-            self._agentsight_profiler = await asyncio.to_thread(
-                start_harbor_agentsight_profile,
-                logs_dir=self.logs_dir,
-                trace_run_id=self._trace_run_id,
-                benchmark=self._trace_benchmark,
-                framework="hermes",
-                attempt=self._trace_attempt,
-                docker_session_id=environment.session_id,
-                tls_python_path=self._agentsight_python_path,
-            )
-        command = """set -e
-export PATH="$HOME/.local/bin:$PATH"
+        secret_path = await stage_secret_environment(
+            environment,
+            self.logs_dir,
+            {"OPENROUTER_API_KEY": api_key},
+        )
+        command = f"""set -e
+{source_secret_environment(secret_path)}export PATH="$HOME/.local/bin:$PATH"
 HERMES_LAUNCHER="$(command -v hermes)"
 HERMES_ENTRY="$(grep '^exec "' "$HERMES_LAUNCHER" | head -n 1 | cut -d'"' -f2 || true)"
 if [ -z "$HERMES_ENTRY" ]; then
@@ -241,11 +240,23 @@ fi
         # debug metadata. Invoke the environment directly so credentials never
         # enter Harbor's agent log record.
         try:
+            if self._trace_attempt is not None:
+                self._agentsight_profiler = await asyncio.to_thread(
+                    start_harbor_agentsight_profile,
+                    logs_dir=self.logs_dir,
+                    trace_run_id=self._trace_run_id,
+                    benchmark=self._trace_benchmark,
+                    framework="hermes",
+                    attempt=self._trace_attempt,
+                    docker_session_id=environment.session_id,
+                    tls_python_path=self._agentsight_python_path,
+                )
             result = await environment.exec(
                 command=f"set -o pipefail; {command}",
                 env=env,
             )
         finally:
+            await remove_secret_environment(environment, secret_path)
             if self._agentsight_profiler is not None:
                 await asyncio.to_thread(self._agentsight_profiler.finish)
         if result.return_code != 0:
