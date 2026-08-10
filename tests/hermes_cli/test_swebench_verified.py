@@ -109,6 +109,7 @@ def test_single_agent_classic_swebench_defaults(variant, expected_instance):
     assert options.instance_ids == (expected_instance,)
     assert options.model == "openrouter/poolside/laguna-s-2.1:free"
     assert options.agent_timeout_seconds == 900
+    assert options.trace_dir == benchmark.DEFAULT_TRACE_DIR
 
 
 def test_lite_uses_a_worker_specialized_for_its_benchmark_identity():

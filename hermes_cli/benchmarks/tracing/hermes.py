@@ -54,20 +54,43 @@ _TOOL_GROUPS = {
 
 def hermes_capabilities(
     observed: Mapping[str, set[str]],
+    *,
+    delegation_enabled: bool,
 ) -> tuple[Capability, ...]:
     """Return an exhaustive, attempt-specific Hermes capability matrix."""
 
-    disabled = {"browser", "memory", "evaluator.lifecycle"}
+    disabled = {
+        "browser",
+        "memory",
+        "evaluator.lifecycle",
+        *(() if delegation_enabled else ("delegation",)),
+    }
     unavailable = {"provider.exchange"}
     characteristics = {
         "agent.session": ("derived", "full", "derived"),
         "model.turn": ("derived", "partial", "derived"),
-        "tool.invocation": ("captured", "partial", "not_available"),
+        "tool.invocation": (
+            "captured",
+            "partial" if delegation_enabled else "full",
+            "not_available",
+        ),
         "tool.result": ("captured", "full", "native_monotonic"),
         "tool.timing": ("captured", "full", "native_monotonic"),
-        "shell": ("captured", "partial", "native_monotonic"),
-        "file": ("captured", "partial", "native_monotonic"),
-        "search": ("captured", "partial", "native_monotonic"),
+        "shell": (
+            "captured",
+            "partial" if delegation_enabled else "full",
+            "native_monotonic",
+        ),
+        "file": (
+            "captured",
+            "partial" if delegation_enabled else "full",
+            "native_monotonic",
+        ),
+        "search": (
+            "captured",
+            "partial" if delegation_enabled else "full",
+            "native_monotonic",
+        ),
         "delegation": ("captured", "full", "native_monotonic"),
         "context.compaction": ("captured", "metadata_only", "not_available"),
         "harness.lifecycle": ("derived", "full", "derived"),
@@ -77,9 +100,14 @@ def hermes_capabilities(
     }
     limitations = {
         "model.turn": (
-            "Root and delegated-child turn timing is derived from native step, "
-            "tool, and conversation-return boundaries; exact provider bodies "
-            "are not exposed.",
+            (
+                "Root and delegated-child turn timing is derived from native step, "
+                "tool, and conversation-return boundaries; exact provider bodies "
+                "are not exposed."
+                if delegation_enabled
+                else "Model-turn timing is derived from native step, tool, and "
+                "conversation-return boundaries; exact provider bodies are not exposed."
+            ),
             "Token and cost accounting are intentionally excluded.",
         ),
         "provider.exchange": (
@@ -89,28 +117,47 @@ def hermes_capabilities(
         "tool.invocation": (
             "Root tool arguments are complete; delegated child arguments are the "
             "display-safe values relayed by Hermes.",
-        ),
+        )
+        if delegation_enabled
+        else (),
         "tool.result": (
-            "Root and delegated child tool results are retained after mandatory "
-            "credential and accounting-field sanitization.",
+            (
+                "Root and delegated child tool results are retained after mandatory "
+                "credential and accounting-field sanitization."
+                if delegation_enabled
+                else "Tool results are retained after mandatory credential and "
+                "accounting-field sanitization."
+            ),
         ),
         "tool.timing": (
-            "Hermes exposes native durations for root and delegated child tools.",
+            (
+                "Hermes exposes native durations for root and delegated child tools."
+                if delegation_enabled
+                else "Hermes exposes native durations for root tools."
+            ),
         ),
         "shell": (
             "Child shell arguments are display-sanitized by Hermes before relay.",
-        ),
+        )
+        if delegation_enabled
+        else (),
         "file": (
             "Child file-tool arguments are display-sanitized by Hermes before relay.",
-        ),
+        )
+        if delegation_enabled
+        else (),
         "search": (
             "Child search arguments are display-sanitized by Hermes before relay.",
-        ),
+        )
+        if delegation_enabled
+        else (),
         "delegation": (
             "Hermes forwards native child lifecycle, text, tool inputs, tool "
             "results, and tool durations; child model activity is represented as "
             "atomic turns without provider request or response bodies.",
-        ),
+        )
+        if delegation_enabled
+        else (),
         "context.compaction": (
             "Hermes emits a completed compaction fact without a start boundary or "
             "duration.",
@@ -188,6 +235,8 @@ class HermesTraceAdapter:
         delegation_enabled: bool,
     ) -> None:
         self._recorder = recorder
+        self._delegation_enabled = delegation_enabled
+        self._primary_agent_id = "coordinator" if delegation_enabled else "agent"
         self._lock = threading.RLock()
         self._observed: dict[str, set[str]] = defaultdict(set)
         self._tools: dict[str, _PendingSpan] = {}
@@ -305,9 +354,10 @@ class HermesTraceAdapter:
                 span_id=span_id,
                 parent_span_id=self._execution_span,
                 session_id=session_id,
+                agent_id=self._primary_agent_id,
                 origin=_derived_origin(),
                 timing={"fidelity": "derived"},
-                payload={"role": "coordinator"},
+                payload={"role": self._primary_agent_id},
             )
             if event_id is None:
                 return
@@ -319,7 +369,7 @@ class HermesTraceAdapter:
                 family="agent",
                 started_ns=started_ns,
                 session_id=session_id,
-                agent_id="coordinator",
+                agent_id=self._primary_agent_id,
             )
             self._observe("agent.session", "agent.session_start")
 
@@ -353,6 +403,7 @@ class HermesTraceAdapter:
                 span_id=span_id,
                 parent_span_id=self._session_parent,
                 session_id=self._session_id,
+                agent_id=self._primary_agent_id,
                 origin=_native_origin("agent.step_callback"),
                 timing={"fidelity": "derived"},
                 payload={"api_call_count": api_call_count},
@@ -367,7 +418,7 @@ class HermesTraceAdapter:
                 family="model",
                 started_ns=started_ns,
                 session_id=self._session_id,
-                agent_id="coordinator",
+                agent_id=self._primary_agent_id,
             )
             self._observe("model.turn", "model.turn_start")
             self._native(
@@ -399,7 +450,7 @@ class HermesTraceAdapter:
                 span_id=span_id,
                 parent_span_id=self._session_parent,
                 session_id=self._session_id,
-                agent_id="coordinator",
+                agent_id=self._primary_agent_id,
                 origin=_native_origin("agent.tool_start_callback"),
                 timing={
                     "fidelity": "native_monotonic",
@@ -424,7 +475,7 @@ class HermesTraceAdapter:
                 family=classification[2],
                 started_ns=started_ns,
                 session_id=self._session_id,
-                agent_id="coordinator",
+                agent_id=self._primary_agent_id,
                 tool_name=tool_name,
             )
             if classification[2] == "delegation" and isinstance(arguments, Mapping):
@@ -667,7 +718,7 @@ class HermesTraceAdapter:
                     span_id=f"hermes-response-{self.identity.trace_id}-{index}",
                     parent_span_id=self._session_parent,
                     session_id=self._session_id,
-                    agent_id="coordinator",
+                    agent_id=self._primary_agent_id,
                     origin=_native_origin("run_conversation.messages"),
                     timing={"fidelity": "not_available"},
                     payload={
@@ -848,7 +899,10 @@ class HermesTraceAdapter:
                 error_message,
             )
             self._recorder.update_capabilities(
-                hermes_capabilities(dict(self._observed))
+                hermes_capabilities(
+                    dict(self._observed),
+                    delegation_enabled=self._delegation_enabled,
+                )
             )
             self._finished = self._recorder.finalize()
             return self._finished
@@ -1366,7 +1420,7 @@ class HermesTraceAdapter:
             agent_id=(
                 _optional_string(metadata.get("subagent_id"))
                 if metadata
-                else "coordinator"
+                else self._primary_agent_id
             ),
             parent_agent_id=(
                 _optional_string(metadata.get("parent_id")) if metadata else None

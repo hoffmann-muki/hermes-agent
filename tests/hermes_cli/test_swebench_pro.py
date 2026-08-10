@@ -130,6 +130,7 @@ def test_single_agent_cli_defaults_preserve_pro_budget(tmp_path):
     assert options.instance_ids == (INSTANCE,)
     assert options.agent_timeout_seconds == 1800
     assert options.model == "openrouter/poolside/laguna-s-2.1:free"
+    assert options.trace_dir == benchmark.DEFAULT_TRACE_DIR
 
 
 def test_explicit_instance_ids_and_window_disable_smoke_default():

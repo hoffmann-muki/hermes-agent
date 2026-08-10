@@ -859,6 +859,92 @@ def test_hermes_adapter_records_native_tools_delegation_and_compaction(tmp_path)
     assert (run.root / "run.json").stat().st_mode & 0o777 == 0o600
 
 
+def test_single_agent_trace_uses_native_role_and_disables_delegation(tmp_path):
+    run = create_hermes_trace_run(tmp_path / "traces", "swe-bench-lite")
+    adapter = create_hermes_attempt_trace(
+        run=run,
+        instance_id=INSTANCE,
+        attempt=1,
+        framework_revision=REVISION,
+        model="openrouter/poolside/laguna-s-2.1:free",
+        agent_timeout_seconds=900,
+        evaluation_workers=1,
+        delegation_enabled=False,
+    )
+    adapter.start_session("task-agent")
+    adapter.on_step(1, [])
+    adapter.on_tool_start("call-1", "terminal", {"command": "pwd"})
+    adapter.on_tool_progress(
+        "tool.completed",
+        "terminal",
+        duration=0.125,
+        is_error=False,
+        result="/testbed\n",
+    )
+    adapter.on_tool_complete(
+        "call-1",
+        "terminal",
+        {"command": "pwd"},
+        "/testbed\n",
+    )
+
+    result = adapter.finish(
+        "completed",
+        messages=[{"role": "assistant", "content": "Finished."}],
+    )
+    attempt_dir = Path(result.attempt_dir)
+    events = _read_jsonl(attempt_dir / "events.jsonl")
+    attempt_start = next(
+        event for event in events if event["event_type"] == "attempt.start"
+    )
+    root_events = [
+        event
+        for event in events
+        if event["event_type"]
+        in {
+            "agent.session_start",
+            "agent.session_end",
+            "model.turn_start",
+            "model.turn_end",
+            "model.response",
+            "shell.start",
+            "shell.end",
+        }
+    ]
+    capabilities = json.loads(
+        (attempt_dir / "capabilities.json").read_text(encoding="utf-8")
+    )["capabilities"]
+    by_category = {item["category"]: item for item in capabilities}
+
+    assert result.health == "healthy"
+    assert attempt_start["payload"]["agent_configuration"] == {
+        "delegation_enabled": False,
+        "coordination_mode": "framework_native",
+        "delegation_sequence": [],
+        "sequence_enforcement": "prompt_guided",
+    }
+    assert root_events
+    assert {event.get("agent_id") for event in root_events} == {"agent"}
+    assert (
+        next(event for event in events if event["event_type"] == "agent.session_start")[
+            "payload"
+        ]["role"]
+        == "agent"
+    )
+    assert by_category["delegation"] == {
+        "category": "delegation",
+        "state": "disabled",
+        "coverage": "none",
+        "timing": "not_applicable",
+        "evidence": [],
+        "limitations": [],
+    }
+    assert by_category["tool.invocation"]["coverage"] == "full"
+    assert by_category["shell"]["coverage"] == "full"
+    assert by_category["tool.invocation"]["limitations"] == []
+    assert by_category["shell"]["limitations"] == []
+
+
 def test_worker_wires_trace_callbacks_without_a_model_call(tmp_path, monkeypatch):
     run = create_hermes_trace_run(tmp_path / "traces", "swe-bench-verified")
     runtime_path = tmp_path / "runtime.json"

@@ -135,7 +135,10 @@ def create_hermes_attempt_trace(
                 "benchmark_retries": benchmark_retries,
                 "provider_attempts": 1,
             },
-            capabilities=hermes_capabilities({}),
+            capabilities=hermes_capabilities(
+                {},
+                delegation_enabled=delegation_enabled,
+            ),
         )
     )
     return HermesTraceAdapter(recorder, delegation_enabled=delegation_enabled)

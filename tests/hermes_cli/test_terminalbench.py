@@ -197,6 +197,7 @@ def test_single_agent_entrypoint_is_native_and_delegation_free(tmp_path: Path):
 
     assert options.agent_topology == "single-agent"
     assert options.model == "openrouter/poolside/laguna-s-2.1:free"
+    assert options.trace_dir == benchmark.DEFAULT_TRACE_DIR
     assert "agent_topology=single-agent" in command
     assert run_manifest["agentTopology"] == "single-agent"
     assert run_manifest["primaryAgent"] == "agent"
