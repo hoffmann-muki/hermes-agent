@@ -1258,6 +1258,62 @@ def test_running_inference_refuses_changed_hermes_source(tmp_path, monkeypatch):
         benchmark.require_unchanged_source(options)
 
 
+def test_source_identity_excludes_benchmark_trace_data(monkeypatch):
+    commit = "a" * 40
+    commands: list[list[str]] = []
+
+    def run_command(args, **_kwargs):
+        commands.append(args)
+        if "rev-parse" in args:
+            return benchmark.CommandResult(args, 0, f"{commit}\n", "")
+        if "diff" in args:
+            return benchmark.CommandResult(args, 0, "", "")
+        return benchmark.CommandResult(
+            args,
+            0,
+            ".benchmark-traces/trace-run/events.jsonl\0",
+            "",
+        )
+
+    monkeypatch.setattr(benchmark, "run_command", run_command)
+
+    identity = benchmark.hermes_source_identity()
+
+    assert identity == {
+        "commit": commit,
+        "dirty": False,
+        "fingerprint": benchmark.hashlib.sha256(commit.encode()).hexdigest(),
+    }
+    diff_command = next(command for command in commands if "diff" in command)
+    assert ":(exclude).benchmark-traces/**" in diff_command
+
+
+def test_source_identity_still_includes_other_untracked_paths(monkeypatch):
+    commit = "b" * 40
+
+    def run_command(args, **_kwargs):
+        if "rev-parse" in args:
+            return benchmark.CommandResult(args, 0, f"{commit}\n", "")
+        if "diff" in args:
+            return benchmark.CommandResult(args, 0, "", "")
+        return benchmark.CommandResult(
+            args,
+            0,
+            ".benchmark-traces/trace-run/events.jsonl\0new_source.py\0",
+            "",
+        )
+
+    monkeypatch.setattr(benchmark, "run_command", run_command)
+
+    identity = benchmark.hermes_source_identity()
+
+    assert identity["commit"] == commit
+    assert identity["dirty"] is True
+    assert (
+        identity["fingerprint"] != benchmark.hashlib.sha256(commit.encode()).hexdigest()
+    )
+
+
 def test_official_evaluator_command_is_local_single_worker_with_one_hour_test_timeout(
     tmp_path,
 ):

@@ -36,6 +36,7 @@ SINGLE_AGENT_DEFAULT_MODEL = "openrouter/poolside/laguna-s-2.1:free"
 DEFAULT_IMAGE_TEMPLATE = "docker.io/swebench/sweb.eval.x86_64.{repo}_1776_{name}:latest"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TRACE_DIR = REPO_ROOT / ".benchmark-traces"
+SOURCE_IDENTITY_EXCLUDED_PATHS = (".benchmark-traces",)
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
 DEFAULT_AGENT_TIMEOUT_SECONDS = 15 * 60
 DEFAULT_SETUP_TIMEOUT_SECONDS = 10 * 60
@@ -696,6 +697,8 @@ def hermes_source_identity() -> dict[str, Any]:
                 "--no-ext-diff",
                 "HEAD",
                 "--",
+                ".",
+                ":(exclude).benchmark-traces/**",
             ],
             timeout=30,
             env=_docker_cli_environment(),
@@ -737,7 +740,11 @@ def hermes_source_identity() -> dict[str, Any]:
     commit = revision.stdout.strip()
     digest.update(commit.encode())
     digest.update(diff.stdout.encode())
-    untracked_paths = sorted(item for item in untracked.stdout.split("\0") if item)
+    untracked_paths = sorted(
+        item
+        for item in untracked.stdout.split("\0")
+        if item and not _is_source_identity_excluded(item)
+    )
     for relative in untracked_paths:
         digest.update(b"\0path\0")
         digest.update(relative.encode())
@@ -753,6 +760,14 @@ def hermes_source_identity() -> dict[str, Any]:
         "dirty": bool(diff.stdout or untracked_paths),
         "fingerprint": digest.hexdigest(),
     }
+
+
+def _is_source_identity_excluded(relative: str) -> bool:
+    path = Path(relative)
+    return any(
+        path == Path(excluded) or Path(excluded) in path.parents
+        for excluded in SOURCE_IDENTITY_EXCLUDED_PATHS
+    )
 
 
 def _source_identity_for_options(options: SourceIdentityOptions) -> dict[str, Any]:
