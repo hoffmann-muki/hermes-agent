@@ -38,6 +38,7 @@ DATASET = "terminal-bench/terminal-bench-2-1"
 TASK_PREFIX = "terminal-bench/"
 OFFICIAL_TASK_COUNT = 89
 DEFAULT_MODEL = "openrouter/qwen/qwen3-coder-next"
+SINGLE_AGENT_DEFAULT_MODEL = "openrouter/poolside/laguna-s-2.1:free"
 DEFAULT_OUTPUT_DIR = ".benchmark-runs/terminal-bench-2.1"
 DEFAULT_ENVIRONMENT = "docker"
 DEFAULT_HERMES_VERSION = "play"
@@ -56,6 +57,7 @@ DEFAULT_NATIVE_SUBAGENT_BUDGET = (
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_API_MAX_RETRIES = 1
 AGENT_TOPOLOGY = "supervisor-delegation"
+SINGLE_AGENT_TOPOLOGY = "single-agent"
 AGENT_IMPORT_PATH = "hermes_cli.benchmarks.terminalbench_harbor:BenchmarkHermes"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TRACE_DIR = REPO_ROOT / ".benchmark-traces"
@@ -65,6 +67,7 @@ LOG_TAIL_LINES = 200
 
 @dataclass(frozen=True)
 class Options:
+    agent_topology: str
     task_names: tuple[str, ...]
     max_tasks: int | None
     attempts: int
@@ -113,14 +116,22 @@ def default_run_id(now: datetime | None = None) -> str:
     return f"terminal-bench-2.1-{re.sub(r'[:+.]', '-', stamp)}"
 
 
-def default_model(env: dict[str, str] | None = None) -> str:
+def default_model(
+    env: dict[str, str] | None = None,
+    *,
+    agent_topology: str = AGENT_TOPOLOGY,
+) -> str:
     source = env if env is not None else os.environ
     if source.get("HERMES_BENCH_MODEL"):
         return source["HERMES_BENCH_MODEL"]
     if source.get("OPENROUTER_MODEL"):
         model = source["OPENROUTER_MODEL"]
         return model if model.startswith("openrouter/") else f"openrouter/{model}"
-    return DEFAULT_MODEL
+    return (
+        SINGLE_AGENT_DEFAULT_MODEL
+        if agent_topology == SINGLE_AGENT_TOPOLOGY
+        else DEFAULT_MODEL
+    )
 
 
 def _git_output(*args: str) -> str:
@@ -158,7 +169,9 @@ def valid_hermes_repository(repository: str) -> bool:
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(agent_topology: str = AGENT_TOPOLOGY) -> argparse.ArgumentParser:
+    if agent_topology not in {AGENT_TOPOLOGY, SINGLE_AGENT_TOPOLOGY}:
+        raise ValueError(f"Unsupported Terminal-Bench topology: {agent_topology}")
     parser = argparse.ArgumentParser(
         description="Run Hermes Agent on Terminal-Bench 2.1 with Harbor",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -209,7 +222,10 @@ Examples:
         type=_non_negative_int,
         default=DEFAULT_INFRASTRUCTURE_RETRIES,
     )
-    parser.add_argument("--model", default=default_model())
+    parser.add_argument(
+        "--model",
+        default=default_model(agent_topology=agent_topology),
+    )
     parser.add_argument(
         "--hermes-version",
         default=DEFAULT_HERMES_VERSION,
@@ -257,9 +273,13 @@ Examples:
     return parser
 
 
-def parse_args(argv: Sequence[str] | None = None) -> Options:
+def parse_args(
+    argv: Sequence[str] | None = None,
+    *,
+    agent_topology: str = AGENT_TOPOLOGY,
+) -> Options:
     raw_args = list(argv if argv is not None else sys.argv[1:])
-    parser = build_parser()
+    parser = build_parser(agent_topology)
     args = parser.parse_args(raw_args)
     try:
         task_names = normalize_task_names(args.task_names or ())
@@ -309,6 +329,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         )
 
     return Options(
+        agent_topology=agent_topology,
         task_names=task_names,
         max_tasks=max_tasks,
         attempts=attempts,
@@ -367,6 +388,7 @@ def build_harbor_command(
         f"version={options.hermes_version}",
         f"repository={options.hermes_repository}",
         f"commit={options.hermes_commit}",
+        f"agent_topology={options.agent_topology}",
     ]
     if trace_run is not None:
         agent_kwargs.extend((
@@ -550,13 +572,42 @@ def manifest(
         "model": options.model,
         "temperature": DEFAULT_TEMPERATURE,
         "agent": AGENT_IMPORT_PATH,
-        "agentTopology": AGENT_TOPOLOGY,
-        "agentSequence": ["coordinator", *DEFAULT_PHASE_BUDGETS],
-        "coordinatorBudget": DEFAULT_COORDINATOR_BUDGET,
-        "delegationMode": DEFAULT_DELEGATION_MODE,
-        "nativeSubagentBudget": DEFAULT_NATIVE_SUBAGENT_BUDGET,
-        "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
-        "peerPhaseBudgetReference": DEFAULT_PHASE_BUDGETS,
+        "agentTopology": options.agent_topology,
+        "primaryAgent": (
+            "agent"
+            if options.agent_topology == SINGLE_AGENT_TOPOLOGY
+            else "coordinator"
+        ),
+        "agentSequence": (
+            ["agent"]
+            if options.agent_topology == SINGLE_AGENT_TOPOLOGY
+            else ["coordinator", *DEFAULT_PHASE_BUDGETS]
+        ),
+        "delegationEnabled": options.agent_topology == AGENT_TOPOLOGY,
+        "agentBudget": DEFAULT_COORDINATOR_BUDGET,
+        "coordinatorBudget": (
+            DEFAULT_COORDINATOR_BUDGET
+            if options.agent_topology == AGENT_TOPOLOGY
+            else None
+        ),
+        "delegationMode": (
+            DEFAULT_DELEGATION_MODE
+            if options.agent_topology == AGENT_TOPOLOGY
+            else "disabled"
+        ),
+        "nativeSubagentBudget": (
+            DEFAULT_NATIVE_SUBAGENT_BUDGET
+            if options.agent_topology == AGENT_TOPOLOGY
+            else None
+        ),
+        "nativeSubagentCount": (
+            DEFAULT_NATIVE_SUBAGENT_COUNT
+            if options.agent_topology == AGENT_TOPOLOGY
+            else 0
+        ),
+        "peerPhaseBudgetReference": (
+            DEFAULT_PHASE_BUDGETS if options.agent_topology == AGENT_TOPOLOGY else None
+        ),
         "apiMaxRetries": DEFAULT_API_MAX_RETRIES,
         "hermesVersion": options.hermes_version,
         "hermesRepository": options.hermes_repository,
@@ -580,8 +631,12 @@ def manifest(
     }
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    options = parse_args(argv)
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    agent_topology: str = AGENT_TOPOLOGY,
+) -> int:
+    options = parse_args(argv, agent_topology=agent_topology)
     paths = build_paths(options)
     command = build_harbor_command(options, paths.jobs_dir)
     if options.dry_run:
@@ -692,6 +747,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if trace_run is not None:
         print(f"Benchmark traces: {trace_run.root}")
     return exit_code
+
+
+def terminalbench_single_main(argv: Sequence[str] | None = None) -> int:
+    return main(argv, agent_topology=SINGLE_AGENT_TOPOLOGY)
 
 
 if __name__ == "__main__":

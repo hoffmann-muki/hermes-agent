@@ -118,6 +118,7 @@ class InferenceOptions:
     dry_run: bool
     trace_dir: Path | None = None
     source_identity: dict[str, Any] | None = None
+    agent_topology: str = swebench_verified.DEFAULT_AGENT_TOPOLOGY
 
     @property
     def include_hints(self) -> bool:
@@ -271,8 +272,13 @@ def format_problem_statement(row: SweBenchProRow) -> str:
     )
 
 
-def build_prompt(row: SweBenchProRow, _include_hints: bool = False) -> str:
-    return "\n".join([
+def build_prompt(
+    row: SweBenchProRow,
+    _include_hints: bool = False,
+    *,
+    agent_topology: str = swebench_verified.DEFAULT_AGENT_TOPOLOGY,
+) -> str:
+    lines = [
         "Resolve this SWE-bench Pro issue using Hermes Agent.",
         "",
         "You are running inside the official SWE-bench Pro task image at /app.",
@@ -280,10 +286,25 @@ def build_prompt(row: SweBenchProRow, _include_hints: bool = False) -> str:
         "Do not seek or use gold patches, hidden tests, or benchmark answer artifacts.",
         "Do not modify tests or benchmark metadata unless the issue explicitly requires it.",
         "",
-        "The benchmark coordinator must use Hermes-native delegation for one fresh",
-        "leaf agent at a time in this order: navigator, patcher, reviewer. It then",
-        "reconciles their reports and leaves final changes in the shared worktree.",
-        "",
+    ]
+    if agent_topology == swebench_verified.DEFAULT_AGENT_TOPOLOGY:
+        lines.extend([
+            "The benchmark coordinator must use Hermes-native delegation for one fresh",
+            "leaf agent at a time in this order: navigator, patcher, reviewer. It then",
+            "reconciles their reports and leaves final changes in the shared worktree.",
+            "",
+        ])
+    elif agent_topology == swebench_verified.SINGLE_AGENT_TOPOLOGY:
+        lines.extend([
+            "You are the sole coding agent. Do not delegate or create child agents.",
+            "Personally investigate the issue, implement the smallest complete fix,",
+            "run focused verification, inspect the final diff, and correct any defects",
+            "you find before returning the result.",
+            "",
+        ])
+    else:
+        raise BenchmarkError(f"Unsupported agent topology: {agent_topology}")
+    lines.extend([
         "## Repository",
         "Worktree: /app",
         f"Repo: {row.repo}",
@@ -300,6 +321,7 @@ def build_prompt(row: SweBenchProRow, _include_hints: bool = False) -> str:
         "- Inspect the final diff before answering.",
         "- Summarize changed files, verification commands, and residual risk.",
     ])
+    return "\n".join(lines)
 
 
 class DatasetRowsClient:
@@ -492,6 +514,11 @@ def _instance_summary(
         "semanticRetriesUsed": 0,
         "timedOut": bool(result.get("timedOut")),
         "workflowComplete": bool(result.get("workflowComplete")),
+        "agentTopology": result.get("agentTopology"),
+        "primaryAgentRole": result.get("primaryAgentRole"),
+        "agentSequence": result.get("agentSequence"),
+        "delegationEnabled": result.get("delegationEnabled"),
+        "delegationMode": result.get("delegationMode"),
         "generationSucceeded": (
             not result.get("error")
             and not result.get("timedOut")
@@ -524,6 +551,42 @@ def _selected_instances(
         }
         for row in rows
     ]
+
+
+def _agent_sequence(topology: str) -> list[str]:
+    if topology == swebench_verified.DEFAULT_AGENT_TOPOLOGY:
+        return list(swebench_verified.DEFAULT_AGENT_SEQUENCE)
+    if topology == swebench_verified.SINGLE_AGENT_TOPOLOGY:
+        return ["agent"]
+    raise BenchmarkError(f"Unsupported agent topology: {topology}")
+
+
+def _agent_budgets(topology: str) -> dict[str, int]:
+    if topology == swebench_verified.DEFAULT_AGENT_TOPOLOGY:
+        return {
+            "coordinator": swebench_verified.DEFAULT_COORDINATOR_BUDGET,
+            "nativeSubagent": swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET,
+            "nativeSubagentCount": swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT,
+        }
+    if topology == swebench_verified.SINGLE_AGENT_TOPOLOGY:
+        return {"singleAgent": swebench_verified.DEFAULT_COORDINATOR_BUDGET}
+    raise BenchmarkError(f"Unsupported agent topology: {topology}")
+
+
+def _delegation_mode(topology: str) -> str:
+    if topology == swebench_verified.DEFAULT_AGENT_TOPOLOGY:
+        return swebench_verified.DEFAULT_DELEGATION_MODE
+    if topology == swebench_verified.SINGLE_AGENT_TOPOLOGY:
+        return "disabled"
+    raise BenchmarkError(f"Unsupported agent topology: {topology}")
+
+
+def _phase_budget_reference(topology: str) -> dict[str, int] | None:
+    if topology == swebench_verified.DEFAULT_AGENT_TOPOLOGY:
+        return swebench_verified.DEFAULT_PHASE_BUDGETS
+    if topology == swebench_verified.SINGLE_AGENT_TOPOLOGY:
+        return None
+    raise BenchmarkError(f"Unsupported agent topology: {topology}")
 
 
 def _manifest(
@@ -561,14 +624,19 @@ def _manifest(
         "codingContext": swebench_verified.DEFAULT_CODING_CONTEXT,
         "agentTimeoutSeconds": options.agent_timeout_seconds,
         "setupTimeoutSeconds": options.setup_timeout_seconds,
-        "agentSequence": list(swebench_verified.DEFAULT_AGENT_SEQUENCE),
-        "agentBudgets": {
-            "coordinator": swebench_verified.DEFAULT_COORDINATOR_BUDGET,
-            "nativeSubagent": swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET,
-            "nativeSubagentCount": (swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT),
-        },
-        "delegationMode": swebench_verified.DEFAULT_DELEGATION_MODE,
-        "peerPhaseBudgetReference": swebench_verified.DEFAULT_PHASE_BUDGETS,
+        "agentTopology": options.agent_topology,
+        "primaryAgentRole": (
+            "coordinator"
+            if options.agent_topology == swebench_verified.DEFAULT_AGENT_TOPOLOGY
+            else "agent"
+        ),
+        "delegationEnabled": (
+            options.agent_topology == swebench_verified.DEFAULT_AGENT_TOPOLOGY
+        ),
+        "agentSequence": _agent_sequence(options.agent_topology),
+        "agentBudgets": _agent_budgets(options.agent_topology),
+        "delegationMode": _delegation_mode(options.agent_topology),
+        "peerPhaseBudgetReference": _phase_budget_reference(options.agent_topology),
         "selectedInstances": _selected_instances(options, rows),
         "instancesSha256": swebench_verified.sha256_text(instances_content),
         "completedInstanceIds": [item["instance_id"] for item in predictions],
@@ -600,6 +668,8 @@ def _write_progress(
             "benchmark": BENCHMARK,
             "dataset": DATASET_NAME,
             "model": swebench_verified.canonical_model(options.model),
+            "agentTopology": options.agent_topology,
+            "delegationMode": _delegation_mode(options.agent_topology),
             "selectedCount": len(rows),
             "completedCount": len(predictions),
             "generationSucceededCount": sum(
@@ -669,14 +739,19 @@ def _expected_resume_contract(
         "codingContext": swebench_verified.DEFAULT_CODING_CONTEXT,
         "agentTimeoutSeconds": options.agent_timeout_seconds,
         "setupTimeoutSeconds": options.setup_timeout_seconds,
-        "agentSequence": list(swebench_verified.DEFAULT_AGENT_SEQUENCE),
-        "agentBudgets": {
-            "coordinator": swebench_verified.DEFAULT_COORDINATOR_BUDGET,
-            "nativeSubagent": swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET,
-            "nativeSubagentCount": (swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT),
-        },
-        "delegationMode": swebench_verified.DEFAULT_DELEGATION_MODE,
-        "peerPhaseBudgetReference": swebench_verified.DEFAULT_PHASE_BUDGETS,
+        "agentTopology": options.agent_topology,
+        "primaryAgentRole": (
+            "coordinator"
+            if options.agent_topology == swebench_verified.DEFAULT_AGENT_TOPOLOGY
+            else "agent"
+        ),
+        "delegationEnabled": (
+            options.agent_topology == swebench_verified.DEFAULT_AGENT_TOPOLOGY
+        ),
+        "agentSequence": _agent_sequence(options.agent_topology),
+        "agentBudgets": _agent_budgets(options.agent_topology),
+        "delegationMode": _delegation_mode(options.agent_topology),
+        "peerPhaseBudgetReference": _phase_budget_reference(options.agent_topology),
         "selectedInstances": _selected_instances(options, rows),
         "instancesSha256": swebench_verified.sha256_text(instances_content),
     }
@@ -715,7 +790,15 @@ def _load_resume(
     mismatches = [
         key
         for key, expected in _expected_resume_contract(options, rows).items()
-        if manifest.get(key) != expected
+        if manifest.get(
+            key,
+            (
+                swebench_verified.DEFAULT_AGENT_TOPOLOGY
+                if key == "agentTopology"
+                else None
+            ),
+        )
+        != expected
     ]
     if mismatches:
         raise BenchmarkError(
@@ -773,6 +856,7 @@ def run_inference(
     swebench_verified.validate_run_id(options.run_id)
     swebench_verified.validate_docker_platform(options.docker_platform)
     swebench_verified.canonical_model(options.model)
+    _agent_sequence(options.agent_topology)
     if options.max_instances <= 0 or options.offset < 0:
         raise BenchmarkError("Instance selection values are invalid")
     owned_client = client is None
@@ -795,6 +879,7 @@ def run_inference(
                 {
                     "mode": "inference",
                     "runId": options.run_id,
+                    "benchmark": BENCHMARK,
                     "dataset": DATASET_NAME,
                     "datasetRevision": DATASET_REVISION,
                     "instanceIds": [row.instance_id for row in rows],
@@ -806,21 +891,42 @@ def run_inference(
                     "apiMaxRetries": swebench_verified.DEFAULT_API_MAX_RETRIES,
                     "agentTimeoutSeconds": options.agent_timeout_seconds,
                     "setupTimeoutSeconds": options.setup_timeout_seconds,
-                    "sequence": list(swebench_verified.DEFAULT_AGENT_SEQUENCE),
-                    "delegationMode": swebench_verified.DEFAULT_DELEGATION_MODE,
-                    "coordinatorBudget": (swebench_verified.DEFAULT_COORDINATOR_BUDGET),
-                    "nativeSubagentBudget": (
-                        swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET
+                    "agentTopology": options.agent_topology,
+                    "primaryAgentRole": (
+                        "coordinator"
+                        if options.agent_topology
+                        == swebench_verified.DEFAULT_AGENT_TOPOLOGY
+                        else "agent"
                     ),
-                    "nativeSubagentCount": (
-                        swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT
+                    "delegationEnabled": (
+                        options.agent_topology
+                        == swebench_verified.DEFAULT_AGENT_TOPOLOGY
                     ),
-                    "nativeSubagentTotalBudget": (
-                        swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET
-                        * swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT
-                    ),
-                    "peerPhaseBudgetReference": (
-                        swebench_verified.DEFAULT_PHASE_BUDGETS
+                    "sequence": _agent_sequence(options.agent_topology),
+                    "delegationMode": _delegation_mode(options.agent_topology),
+                    "agentBudget": swebench_verified.DEFAULT_COORDINATOR_BUDGET,
+                    **(
+                        {
+                            "coordinatorBudget": (
+                                swebench_verified.DEFAULT_COORDINATOR_BUDGET
+                            ),
+                            "nativeSubagentBudget": (
+                                swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET
+                            ),
+                            "nativeSubagentCount": (
+                                swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT
+                            ),
+                            "nativeSubagentTotalBudget": (
+                                swebench_verified.DEFAULT_NATIVE_SUBAGENT_BUDGET
+                                * swebench_verified.DEFAULT_NATIVE_SUBAGENT_COUNT
+                            ),
+                            "peerPhaseBudgetReference": (
+                                swebench_verified.DEFAULT_PHASE_BUDGETS
+                            ),
+                        }
+                        if options.agent_topology
+                        == swebench_verified.DEFAULT_AGENT_TOPOLOGY
+                        else {}
                     ),
                     "images": [
                         official_image(row.dockerhub_tag, options.image_prefix)
@@ -893,37 +999,31 @@ def run_inference(
             )
             image_metadata["docker"] = docker_metadata
             swebench_verified.require_unchanged_source(frozen_options)
-            if trace_run is None:
-                result = swebench_verified._run_worker(
-                    frozen_options,
-                    row,
-                    instance_dir,
-                    image,
-                    image_metadata,
-                    benchmark=BENCHMARK,
-                    worker_module="hermes_cli.benchmarks.swebench_pro_worker",
-                    prompt_builder=build_prompt,
-                    worktree="/app",
-                )
-            else:
-                result = swebench_verified._run_worker(
-                    frozen_options,
-                    row,
-                    instance_dir,
-                    image,
-                    image_metadata,
-                    benchmark=BENCHMARK,
-                    worker_module="hermes_cli.benchmarks.swebench_pro_worker",
-                    prompt_builder=build_prompt,
-                    worktree="/app",
-                    evaluation_timeout_seconds=DEFAULT_EVALUATION_TIMEOUT_SECONDS,
-                    trace_run=trace_run,
-                )
+            result = swebench_verified._run_worker(
+                frozen_options,
+                row,
+                instance_dir,
+                image,
+                image_metadata,
+                benchmark=BENCHMARK,
+                worker_module="hermes_cli.benchmarks.swebench_pro_worker",
+                prompt_builder=lambda selected_row, include_hints: build_prompt(
+                    selected_row,
+                    include_hints,
+                    agent_topology=options.agent_topology,
+                ),
+                worktree="/app",
+                evaluation_timeout_seconds=DEFAULT_EVALUATION_TIMEOUT_SECONDS,
+                trace_run=trace_run,
+                agent_topology=options.agent_topology,
+            )
         except Exception as exc:
             result = {
                 "modelPatch": "",
                 "changedPaths": [],
                 "workflowComplete": False,
+                "agentTopology": options.agent_topology,
+                "delegationMode": _delegation_mode(options.agent_topology),
                 "timedOut": False,
                 "error": f"{type(exc).__name__}: {exc}",
                 "controllerStartedAt": swebench_verified.utc_now(),
@@ -1910,11 +2010,18 @@ def _nonnegative_int(value: str) -> int:
     return parsed
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(
+    agent_topology: str = swebench_verified.DEFAULT_AGENT_TOPOLOGY,
+) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="hermes-swebench-pro",
+        prog=(
+            "hermes-swebench-pro-single"
+            if agent_topology == swebench_verified.SINGLE_AGENT_TOPOLOGY
+            else "hermes-swebench-pro"
+        ),
         description="Run Hermes Agent on SWE-bench Pro with local Docker evaluation.",
     )
+    parser.set_defaults(agent_topology=agent_topology)
     subparsers = parser.add_subparsers(dest="command", required=True)
     infer = subparsers.add_parser("infer", help="Generate SWE-bench Pro predictions")
     infer.add_argument("--run-id", default=default_run_id())
@@ -1922,7 +2029,14 @@ def build_parser() -> argparse.ArgumentParser:
     infer.add_argument("--instance-id", action="append", default=[])
     infer.add_argument("--max-instances", type=_positive_int)
     infer.add_argument("--offset", type=_nonnegative_int)
-    infer.add_argument("--model", default=DEFAULT_MODEL)
+    infer.add_argument(
+        "--model",
+        default=(
+            swebench_verified.SINGLE_AGENT_DEFAULT_MODEL
+            if agent_topology == swebench_verified.SINGLE_AGENT_TOPOLOGY
+            else DEFAULT_MODEL
+        ),
+    )
     infer.add_argument("--image-prefix", default=DEFAULT_IMAGE_PREFIX)
     infer.add_argument("--docker-platform", default=DEFAULT_DOCKER_PLATFORM)
     infer.add_argument(
@@ -2002,11 +2116,16 @@ def options_from_args(args: argparse.Namespace) -> InferenceOptions:
         restart=args.restart,
         dry_run=args.dry_run,
         trace_dir=args.trace_dir,
+        agent_topology=args.agent_topology,
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    agent_topology: str = swebench_verified.DEFAULT_AGENT_TOPOLOGY,
+) -> int:
+    parser = build_parser(agent_topology)
     args = parser.parse_args(argv)
 
     def terminate(signum: int, _frame: Any) -> None:
@@ -2048,6 +2167,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 130
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
+
+
+def swebenchpro_single_main(argv: Sequence[str] | None = None) -> int:
+    return main(argv, agent_topology=swebench_verified.SINGLE_AGENT_TOPOLOGY)
 
 
 if __name__ == "__main__":

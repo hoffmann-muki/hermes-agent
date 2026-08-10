@@ -48,6 +48,24 @@ worktree architecture. Hermes pins the dataset revision that the peer
 configurations currently resolve instead of silently accepting later dataset
 changes.
 
+## Single-agent command
+
+Use the dedicated command for a framework-native single-agent run:
+
+```bash
+hermes-swebench-pro-single infer --run-id laguna-pro-single
+```
+
+The worker constructs one Hermes coding agent with only terminal and file
+toolsets; delegation configuration and `delegate_task` are absent. It defaults
+to `openrouter/poolside/laguna-s-2.1:free` and retains the Pro execution
+defaults above: one worker, one benchmark attempt, zero infrastructure retries,
+one provider attempt, temperature `0.1`, a 24-iteration budget, and a
+1,800-second deadline. The sole agent owns investigation, implementation,
+focused verification, and final-diff review. Semantic tracing and AgentSight
+profiling remain automatic and record `single-agent` topology with delegation
+disabled.
+
 ## Prerequisites
 
 - A working local Docker daemon. Hermes runs instances serially by default and

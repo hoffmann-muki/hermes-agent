@@ -39,6 +39,25 @@ delegation calls, leaf roles, order, and completion status; a violation marks
 the workflow incomplete but does not replace or mechanically constrain Hermes'
 native orchestration.
 
+## Single-agent commands
+
+Dedicated commands run one native Hermes coding agent with delegation removed
+from its toolset and configuration:
+
+```bash
+hermes-swebench-verified-single infer --run-id laguna-verified-single
+hermes-swebench-lite-single infer --run-id laguna-lite-single
+```
+
+The Lite command selects `princeton-nlp/SWE-bench_Lite` and defaults to
+`astropy__astropy-12907`; the Verified command retains the dataset and smoke ID
+above. Both default to `openrouter/poolside/laguna-s-2.1:free` and use one
+worker, one benchmark attempt, one provider attempt, a 900-second deadline,
+temperature `0.1`, and a 24-iteration budget. The sole agent is explicitly
+responsible for investigation, implementation, focused verification, and
+final-diff review. Semantic tracing and AgentSight profiling remain enabled by
+default, with the recorded topology set to `single-agent`.
+
 ## Prerequisites
 
 - A working local Docker daemon. Hermes runs instances serially by default and
@@ -168,6 +187,14 @@ Point `--python` at the environment containing the pinned harness:
 hermes-swebench-verified evaluate \
   --run-id qwen-next-verified-smoke \
   --python /path/to/swebench-4.1.0/bin/python
+```
+
+Single-agent artifacts remain topology-bound; evaluate them through their
+matching command (use the same `--python` override when needed):
+
+```bash
+hermes-swebench-verified-single evaluate --run-id laguna-verified-single
+hermes-swebench-lite-single evaluate --run-id laguna-lite-single
 ```
 
 Before starting Docker evaluation, Hermes verifies the completed manifest,

@@ -28,6 +28,7 @@ def test_safe_defaults_match_peer_terminal_bench_runners():
     assert options.public is False
     assert options.leaderboard is False
     assert options.trace_dir == benchmark.DEFAULT_TRACE_DIR
+    assert options.agent_topology == benchmark.AGENT_TOPOLOGY
     assert worker.COORDINATOR_BUDGET == 24
     assert worker.PEER_PHASE_BUDGETS == {
         "navigator": 10,
@@ -129,6 +130,7 @@ def test_harbor_command_is_reproducible_and_credential_free(tmp_path: Path):
         "version=play",
         f"repository={options.hermes_repository}",
         f"commit={options.hermes_commit}",
+        "agent_topology=supervisor-delegation",
     ]
     assert command[command.index("--env") + 1] == "docker"
     assert command[command.index("--n-attempts") + 1] == "2"
@@ -179,6 +181,33 @@ def test_tracing_can_be_disabled_explicitly():
     assert (
         benchmark.parse_args(["--run-id", "untraced", "--no-trace"]).trace_dir is None
     )
+
+
+def test_single_agent_entrypoint_is_native_and_delegation_free(tmp_path: Path):
+    options = benchmark.parse_args(
+        ["--run-id", "single"],
+        agent_topology=benchmark.SINGLE_AGENT_TOPOLOGY,
+    )
+    command = benchmark.build_harbor_command(options, tmp_path / "jobs")
+    run_manifest = benchmark.manifest(
+        options,
+        benchmark.build_paths(options),
+        command,
+    )
+
+    assert options.agent_topology == "single-agent"
+    assert options.model == "openrouter/poolside/laguna-s-2.1:free"
+    assert "agent_topology=single-agent" in command
+    assert run_manifest["agentTopology"] == "single-agent"
+    assert run_manifest["primaryAgent"] == "agent"
+    assert run_manifest["agentSequence"] == ["agent"]
+    assert run_manifest["delegationEnabled"] is False
+    assert run_manifest["agentBudget"] == 24
+    assert run_manifest["coordinatorBudget"] is None
+    assert run_manifest["delegationMode"] == "disabled"
+    assert run_manifest["nativeSubagentBudget"] is None
+    assert run_manifest["nativeSubagentCount"] == 0
+    assert run_manifest["peerPhaseBudgetReference"] is None
 
 
 def test_git_remote_is_normalized_for_credential_free_container_install(monkeypatch):
@@ -307,6 +336,86 @@ def test_worker_config_is_local_isolated_and_retry_free(tmp_path: Path, monkeypa
     assert worker.os.environ["HERMES_CONCURRENT_TOOL_TIMEOUT_S"] == "86400"
 
 
+def test_single_agent_worker_omits_delegation_runtime(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    captured = {}
+    monkeypatch.setattr(
+        "hermes_cli.config.apply_terminal_config_to_env",
+        lambda *, config, override: captured.update(config=config, override=override),
+    )
+
+    worker._configure_runtime(tmp_path, worker.SINGLE_AGENT_TOPOLOGY)
+
+    assert "delegation" not in captured["config"]
+    assert "HERMES_CONCURRENT_TOOL_TIMEOUT_S" not in worker.os.environ
+    assert captured["config"]["agent"] == {
+        "api_max_retries": 1,
+        "coding_context": "off",
+    }
+
+
+def test_single_agent_worker_uses_one_agent_and_self_review_prompt(
+    tmp_path: Path, monkeypatch
+):
+    captured = {}
+
+    class Agent:
+        def run_conversation(self, instruction, *, system_message, task_id):
+            captured.update(
+                instruction=instruction,
+                system_message=system_message,
+                task_id=task_id,
+            )
+            return {
+                "completed": True,
+                "interrupted": False,
+                "messages": [],
+                "final_response": "done",
+            }
+
+        def release_clients(self):
+            return None
+
+    def factory(**kwargs):
+        captured["agent_options"] = kwargs
+        return Agent()
+
+    monkeypatch.setattr(worker, "create_trace_adapter", lambda: None)
+    monkeypatch.setattr(
+        worker, "_configure_runtime", lambda _workdir, _agent_topology: None
+    )
+    monkeypatch.setattr(worker, "SESSION_PATH", tmp_path / "session.jsonl")
+
+    result = worker.run_worker(
+        "Complete the task.",
+        api_key="test-only-key",
+        model="qwen/qwen3-coder-next",
+        workdir=tmp_path,
+        agent_factory=factory,
+        agent_topology=worker.SINGLE_AGENT_TOPOLOGY,
+    )
+
+    assert captured["agent_options"]["role"] == "agent"
+    assert captured["agent_options"]["budget"] == 24
+    assert captured["agent_options"]["agent_topology"] == "single-agent"
+    assert "Do not delegate" in captured["system_message"]
+    assert "review the final environment state" in captured["system_message"]
+    assert result["agentTopology"] == "single-agent"
+    assert result["primaryAgentRole"] == "agent"
+    assert "agent" in result
+    assert "coordinator" not in result
+    assert result["agentSequence"] == ["agent"]
+    assert result["delegationEnabled"] is False
+    assert result["agentBudget"] == 24
+    assert result["coordinatorBudget"] is None
+    assert result["delegationMode"] == "disabled"
+    assert result["nativeSubagentBudget"] is None
+    assert result["nativeSubagentCount"] == 0
+    assert result["peerPhaseBudgetReference"] is None
+    assert result["workflowComplete"] is True
+    assert result["phases"] == []
+
+
 def test_worker_session_artifact_redacts_provider_credentials(
     tmp_path: Path, monkeypatch
 ):
@@ -364,7 +473,9 @@ def test_trace_completion_is_independent_of_delegation_audit(
             return None
 
     monkeypatch.setattr(worker, "create_trace_adapter", Trace)
-    monkeypatch.setattr(worker, "_configure_runtime", lambda _workdir: None)
+    monkeypatch.setattr(
+        worker, "_configure_runtime", lambda _workdir, _agent_topology: None
+    )
     monkeypatch.setattr(worker, "SESSION_PATH", tmp_path / "session.jsonl")
     monkeypatch.setenv(
         "HERMES_BENCHMARK_TRACE_CONFIG",

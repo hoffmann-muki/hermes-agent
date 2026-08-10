@@ -23,6 +23,10 @@ this workspace:
 | Iteration budgets | Coordinator `24`; three native children at `13` each |
 | Hermes API attempts/retries per model call | `1` / `0` (`api_max_retries: 1`) |
 
+The dedicated single-agent command changes only the model default to
+`openrouter/poolside/laguna-s-2.1:free`; its Harbor protocol and execution
+limits remain the same.
+
 The coordinator uses Hermes' native `delegate_task` tool for one fresh leaf
 agent at a time in the same Harbor task environment. The one-shot worker
 declares stateless delivery, activating Hermes' supported synchronous fallback
@@ -35,6 +39,13 @@ the closest lower-cost match to the peers' `10` / `18` / `12` specialist split
 (40 combined). A post-run audit checks the observed native calls, leaf roles,
 order, and completion status. It marks parity violations in the result but does
 not intercept or mechanically enforce the framework's orchestration.
+
+The dedicated `hermes-terminalbench-single` command instead constructs one
+native 24-iteration Hermes coding agent with only terminal and file toolsets.
+Delegation configuration and `delegate_task` are absent. The sole agent is
+responsible for investigation, implementation, focused verification, and final
+review, while all Harbor, model, retry, concurrency, provenance, tracing, and
+profiling settings remain identical.
 
 Harbor's official task definitions remain authoritative for setup, agent, and
 verifier timeouts. The wrapper does not impose the SWE-bench 1,800-second agent
@@ -67,6 +78,9 @@ hermes-terminalbench --dry-run
 
 # Safe one-task smoke evaluation.
 hermes-terminalbench --run-id qwen-next-terminal-smoke
+
+# Same Harbor protocol with one native Hermes agent.
+hermes-terminalbench-single --run-id laguna-terminal-single
 
 # Explicit task IDs, retained in the supplied order.
 hermes-terminalbench \

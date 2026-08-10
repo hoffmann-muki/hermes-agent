@@ -26,6 +26,9 @@ from hermes_cli.benchmarks.tracing.harbor import (
 )
 
 
+AGENT_TOPOLOGIES = {"supervisor-delegation", "single-agent"}
+
+
 class BenchmarkHermes(Hermes):
     """Install Hermes, then run its isolated benchmark coordinator."""
 
@@ -35,6 +38,7 @@ class BenchmarkHermes(Hermes):
         prompt_template_path: Path | str | None = None,
         repository: str = "https://github.com/NousResearch/hermes-agent.git",
         commit: str | None = None,
+        agent_topology: str = "supervisor-delegation",
         trace_root: str | None = None,
         trace_run_id: str | None = None,
         trace_created_at: str | None = None,
@@ -58,8 +62,13 @@ class BenchmarkHermes(Hermes):
             raise ValueError("repository must be a credential-free HTTPS Git URL")
         if commit is not None and not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
             raise ValueError("commit must be a full 40-character Git commit")
+        if agent_topology not in AGENT_TOPOLOGIES:
+            raise ValueError(
+                "agent_topology must be supervisor-delegation or single-agent"
+            )
         self._repository = repository
         self._commit = commit
+        self._agent_topology = agent_topology
         trace_values = (
             trace_root,
             trace_run_id,
@@ -176,6 +185,7 @@ class BenchmarkHermes(Hermes):
 
         env = {
             "HARBOR_INSTRUCTION": instruction,
+            "HERMES_BENCHMARK_AGENT_TOPOLOGY": self._agent_topology,
             "HERMES_BENCHMARK_MODEL": self.model_name.removeprefix("openrouter/"),
             "HERMES_HOME": "/tmp/hermes",
             "OPENROUTER_API_KEY": api_key,
@@ -204,6 +214,7 @@ class BenchmarkHermes(Hermes):
                     "harborVersion": self._harbor_version,
                     "sessionId": self.session_id,
                     "containerImage": self._trace_attempt.container_image,
+                    "agentTopology": self._agent_topology,
                 },
                 separators=(",", ":"),
             )
@@ -302,6 +313,10 @@ fi
         context.cost_usd = float(usage.get("estimated_cost_usd") or 0)
         context.metadata = {
             **(context.metadata or {}),
+            "agent_topology": result.get("agentTopology"),
+            "agent_sequence": result.get("agentSequence"),
+            "primary_agent_role": result.get("primaryAgentRole"),
+            "delegation_enabled": result.get("delegationEnabled"),
             "workflow_complete": bool(result.get("workflowComplete")),
             "phase_order": result.get("phaseOrder"),
             "delegation_mode": result.get("delegationMode"),

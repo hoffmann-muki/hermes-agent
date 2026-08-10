@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from hermes_cli.benchmarks import swebench_verified as benchmark
+from hermes_cli.benchmarks import swebench_lite_worker
 from hermes_cli.benchmarks import swebench_verified_worker as worker
 
 
@@ -87,6 +88,35 @@ def test_cli_defaults_match_other_frameworks(tmp_path):
     assert worker.NATIVE_SUBAGENT_COUNT == 3
     assert benchmark.DEFAULT_DELEGATION_MODE == "native"
     assert worker.TEMPERATURE == 0.1
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected_instance"),
+    [
+        (benchmark.SWE_BENCH_VERIFIED, "scikit-learn__scikit-learn-13439"),
+        (benchmark.SWE_BENCH_LITE, "astropy__astropy-12907"),
+    ],
+)
+def test_single_agent_classic_swebench_defaults(variant, expected_instance):
+    args = benchmark.build_parser(variant, benchmark.SINGLE_AGENT_TOPOLOGY).parse_args([
+        "infer",
+        "--dry-run",
+    ])
+    options = benchmark.options_from_args(args)
+
+    assert options.variant is variant
+    assert options.agent_topology == "single-agent"
+    assert options.instance_ids == (expected_instance,)
+    assert options.model == "openrouter/poolside/laguna-s-2.1:free"
+    assert options.agent_timeout_seconds == 900
+
+
+def test_lite_uses_a_worker_specialized_for_its_benchmark_identity():
+    assert benchmark.SWE_BENCH_LITE.worker_module.endswith("swebench_lite_worker")
+    with swebench_lite_worker.configuration():
+        assert worker.WORKER_BENCHMARK == "swe-bench-lite"
+        assert worker.ROW_PARSER is benchmark.parse_swebench_row
+    assert worker.WORKER_BENCHMARK == "swe-bench-verified"
 
 
 def test_explicit_instance_ids_preserve_order_and_disable_smoke_default(tmp_path):
@@ -202,6 +232,21 @@ def test_hints_are_opt_in_for_benchmark_prompt():
     assert "Inspect validation." in with_hints
 
 
+def test_lite_single_agent_prompt_assigns_complete_work_without_delegation():
+    row = benchmark.parse_swebench_row(make_row())
+    prompt = benchmark.build_prompt(
+        row,
+        include_hints=False,
+        variant=benchmark.SWE_BENCH_LITE,
+        agent_topology=benchmark.SINGLE_AGENT_TOPOLOGY,
+    )
+
+    assert "SWE-bench Lite" in prompt
+    assert "sole coding agent" in prompt
+    assert "Do not delegate" in prompt
+    assert "navigator, patcher, reviewer" not in prompt
+
+
 def native_delegation_messages(
     phases=("navigator", "patcher", "reviewer"),
     *,
@@ -256,9 +301,7 @@ def native_delegation_messages(
 
 
 def test_native_delegation_audit_records_sequential_leaf_handoffs():
-    records, errors = worker.audit_native_delegations(
-        native_delegation_messages()
-    )
+    records, errors = worker.audit_native_delegations(native_delegation_messages())
 
     assert errors == []
     assert [record["phase"] for record in records] == list(worker.PHASE_ORDER)
@@ -361,6 +404,36 @@ def test_worker_terminal_config_is_local_docker_without_resource_caps_or_forward
         "orchestrator_enabled": False,
     }
     assert type(config["agent"]["api_max_retries"]) is int
+
+
+def test_single_agent_worker_removes_delegation_configuration_and_tools(
+    tmp_path, monkeypatch
+):
+    request = {
+        "taskId": "single-scope-test",
+        "model": benchmark.DEFAULT_MODEL,
+        "hermesHome": str(tmp_path / "home"),
+        "image": benchmark.official_image(INSTANCE),
+        "dockerPlatform": "linux/amd64",
+        "agentTimeoutSeconds": 900,
+        "agentTopology": benchmark.SINGLE_AGENT_TOPOLOGY,
+    }
+    assert "delegation" not in worker._terminal_config(request)
+
+    worker.configure_worker(request)
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    agent = worker.default_agent_factory(
+        role="agent",
+        budget=24,
+        api_key="dummy-benchmark-key",
+        request=request,
+    )
+    try:
+        assert "delegate_task" not in agent.valid_tool_names
+        assert agent.max_iterations == 24
+        assert agent.client.max_retries == 0
+    finally:
+        agent.release_clients()
 
 
 def test_worker_config_reaches_terminal_runtime_consumption_point(
@@ -638,12 +711,13 @@ def test_completed_worker_also_defers_capture_and_container_cleanup(
         "image": benchmark.official_image(INSTANCE),
         "dockerPlatform": "linux/amd64",
         "agentTimeoutSeconds": 1800,
+        "agentTopology": benchmark.SINGLE_AGENT_TOPOLOGY,
         "sourceIdentity": benchmark.hermes_source_identity(),
     }
     fake_environment = SimpleNamespace(_container_id="a" * 64)
 
     class CompletingAgent:
-        session_id = "coordinator"
+        session_id = "agent"
 
         def __init__(self):
             self._active_children = []
@@ -679,9 +753,21 @@ def test_completed_worker_also_defers_capture_and_container_cleanup(
 
     runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
     assert runtime["agentCompletedAt"]
+    assert runtime["primaryAgentRole"] == "agent"
+    assert runtime["toolTimeoutSeconds"] == 1860
+    assert runtime["delegationToolTimeoutSeconds"] is None
     assert result["timedOut"] is False
     assert result["deferCaptureToController"] is True
     assert result["modelPatch"] is None
+    assert result["workflowComplete"] is True
+    assert result["agentTopology"] == "single-agent"
+    assert result["primaryAgentRole"] == "agent"
+    assert result["agentSequence"] == ["agent"]
+    assert result["phaseOrder"] == ["agent"]
+    assert "agent" in result
+    assert "coordinator" not in result
+    assert result["delegationMode"] == "disabled"
+    assert result["phases"] == []
 
 
 @pytest.mark.parametrize(
@@ -972,13 +1058,11 @@ def test_interrupt_during_ownership_still_removes_container_and_persists_patch(
 
 
 def test_workflow_requires_coordinator_reconciliation():
-    records, errors = worker.audit_native_delegations(
-        native_delegation_messages()
-    )
+    records, errors = worker.audit_native_delegations(native_delegation_messages())
 
-    assert worker.reconciled_workflow(
-        records, errors, {"completed": False}, None
-    ) is False
+    assert (
+        worker.reconciled_workflow(records, errors, {"completed": False}, None) is False
+    )
     assert (
         worker.reconciled_workflow(
             records,
@@ -1391,3 +1475,24 @@ def test_dry_run_reports_parity_contract_without_requiring_api_key(tmp_path, cap
         "patcher": 18,
         "reviewer": 12,
     }
+
+
+def test_single_agent_dry_run_reports_native_primary_role(tmp_path, capsys):
+    class StaticDataset:
+        def select(self, *_args, **_kwargs):
+            return [benchmark.parse_swebench_row(make_row())]
+
+    options = make_options(
+        tmp_path,
+        dry_run=True,
+        agent_topology=benchmark.SINGLE_AGENT_TOPOLOGY,
+    )
+    benchmark.run_inference(options, dataset_client=StaticDataset())
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["agentTopology"] == "single-agent"
+    assert payload["primaryAgentRole"] == "agent"
+    assert payload["delegationEnabled"] is False
+    assert payload["sequence"] == ["agent"]
+    assert payload["delegationMode"] == "disabled"
+    assert payload["agentBudget"] == 24

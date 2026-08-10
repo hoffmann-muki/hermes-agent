@@ -95,6 +95,7 @@ def test_cli_defaults_match_peer_frameworks(tmp_path):
     assert options.model == "openrouter/qwen/qwen3-coder-next"
     assert options.agent_timeout_seconds == 1800
     assert options.setup_timeout_seconds == 600
+    assert options.agent_topology == shared.DEFAULT_AGENT_TOPOLOGY
     assert benchmark.DEFAULT_INFERENCE_WORKERS == 1
     assert benchmark.DEFAULT_EVALUATION_WORKERS == 1
     assert benchmark.DEFAULT_ATTEMPTS == 1
@@ -115,6 +116,20 @@ def test_cli_defaults_match_peer_frameworks(tmp_path):
         "patcher": 18,
         "reviewer": 12,
     }
+
+
+def test_single_agent_cli_defaults_preserve_pro_budget(tmp_path):
+    args = benchmark.build_parser(shared.SINGLE_AGENT_TOPOLOGY).parse_args([
+        "infer",
+        "--output-dir",
+        str(tmp_path),
+    ])
+    options = benchmark.options_from_args(args)
+
+    assert options.agent_topology == "single-agent"
+    assert options.instance_ids == (INSTANCE,)
+    assert options.agent_timeout_seconds == 1800
+    assert options.model == "openrouter/poolside/laguna-s-2.1:free"
 
 
 def test_explicit_instance_ids_and_window_disable_smoke_default():
@@ -315,6 +330,11 @@ def test_pro_worker_configuration_uses_app_and_restores_verified_globals(tmp_pat
         assert config["terminal"]["cwd"] == "/app"
         assert config["terminal"]["container_memory"] == 0
         assert shared_worker.ROW_PARSER is benchmark.parse_swebench_pro_row
+        single_config = shared_worker._terminal_config({
+            **request,
+            "agentTopology": shared.SINGLE_AGENT_TOPOLOGY,
+        })
+        assert "delegation" not in single_config
 
     assert (
         shared_worker.WORKER_BENCHMARK,
@@ -370,6 +390,19 @@ def test_pro_prompt_and_native_delegation_contract_are_complete():
     assert "prior handoffs" in system
 
 
+def test_single_agent_prompt_assigns_the_complete_pro_workflow():
+    row = benchmark.parse_swebench_pro_row(make_raw_row())
+    prompt = benchmark.build_prompt(
+        row,
+        agent_topology=shared.SINGLE_AGENT_TOPOLOGY,
+    )
+
+    assert "sole coding agent" in prompt
+    assert "Do not delegate" in prompt
+    assert benchmark.format_problem_statement(row) in prompt
+    assert "navigator, patcher, reviewer" not in prompt
+
+
 def test_prediction_schema_and_manifest_record_parity(tmp_path):
     row = benchmark.parse_swebench_pro_row(make_raw_row())
     options = make_options(tmp_path)
@@ -407,6 +440,20 @@ def test_prediction_schema_and_manifest_record_parity(tmp_path):
         benchmark.public_row_sha256(row)
     )
     assert manifest["instancesSha256"]
+
+
+def test_single_agent_manifest_disables_delegation_metadata(tmp_path):
+    row = benchmark.parse_swebench_pro_row(make_raw_row())
+    options = make_options(tmp_path, agent_topology=shared.SINGLE_AGENT_TOPOLOGY)
+    manifest = benchmark._manifest(options, [row], [], complete=False)
+
+    assert manifest["agentTopology"] == "single-agent"
+    assert manifest["primaryAgentRole"] == "agent"
+    assert manifest["delegationEnabled"] is False
+    assert manifest["agentSequence"] == ["agent"]
+    assert manifest["agentBudgets"] == {"singleAgent": 24}
+    assert manifest["delegationMode"] == "disabled"
+    assert manifest["peerPhaseBudgetReference"] is None
 
 
 def write_complete_artifact(tmp_path: Path):
@@ -684,6 +731,30 @@ def test_inference_dry_run_resolves_defaults_without_docker_or_api(tmp_path, cap
     assert output["images"] == [benchmark.official_image(DOCKERHUB_TAG)]
 
 
+def test_single_agent_dry_run_reports_disabled_delegation(tmp_path, capsys):
+    class Client:
+        def select(self, *_args, **_kwargs):
+            return [benchmark.parse_swebench_pro_row(make_raw_row())]
+
+    options = make_options(
+        tmp_path,
+        dry_run=True,
+        source_identity=None,
+        agent_topology=shared.SINGLE_AGENT_TOPOLOGY,
+    )
+    benchmark.run_inference(options, client=Client())
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["agentTopology"] == "single-agent"
+    assert output["benchmark"] == "swe-bench-pro"
+    assert output["primaryAgentRole"] == "agent"
+    assert output["delegationEnabled"] is False
+    assert output["sequence"] == ["agent"]
+    assert output["delegationMode"] == "disabled"
+    assert output["agentBudget"] == 24
+    assert "nativeSubagentBudget" not in output
+
+
 def test_inference_dispatches_pro_worker_and_app_capture(tmp_path, monkeypatch):
     class Client:
         def select(self, *_args, **_kwargs):
@@ -708,12 +779,16 @@ def test_inference_dispatches_pro_worker_and_app_capture(tmp_path, monkeypatch):
     monkeypatch.setattr(shared, "_run_worker", run_worker)
     paths = benchmark.run_inference(make_options(tmp_path), client=Client())
 
-    assert observed == {
-        "benchmark": benchmark.BENCHMARK,
-        "worker_module": "hermes_cli.benchmarks.swebench_pro_worker",
-        "prompt_builder": benchmark.build_prompt,
-        "worktree": "/app",
-    }
+    assert observed["benchmark"] == benchmark.BENCHMARK
+    assert observed["worker_module"] == "hermes_cli.benchmarks.swebench_pro_worker"
+    assert observed["worktree"] == "/app"
+    assert observed["evaluation_timeout_seconds"] == 3600
+    assert observed["trace_run"] is None
+    assert observed["agent_topology"] == shared.DEFAULT_AGENT_TOPOLOGY
+    prompt = observed["prompt_builder"](
+        benchmark.parse_swebench_pro_row(make_raw_row()), False
+    )
+    assert "navigator, patcher, reviewer" in prompt
     predictions = json.loads(paths.predictions.read_text(encoding="utf-8"))
     assert predictions[0]["patch"] == "diff --git a/a b/a"
 

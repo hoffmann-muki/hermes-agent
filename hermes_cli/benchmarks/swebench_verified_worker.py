@@ -1,8 +1,9 @@
 """Per-instance worker for :mod:`hermes_cli.benchmarks.swebench_verified`.
 
-The controller owns selection, deadlines, and checkpoints.  This worker owns
-one Docker container and one coordinator run, keeping process-global Hermes
-tool configuration isolated to a single benchmark instance.
+The controller owns selection, deadlines, and checkpoints. This worker owns
+one Docker container and one primary-agent run, keeping process-global Hermes
+tool configuration isolated to a single benchmark instance. The primary role
+is a coordinator only for the delegated topology.
 """
 
 from __future__ import annotations
@@ -22,12 +23,14 @@ import yaml
 from hermes_cli.benchmarks.swebench_verified import (
     BENCHMARK,
     DEFAULT_API_MAX_RETRIES,
+    DEFAULT_AGENT_TOPOLOGY,
     DEFAULT_COORDINATOR_BUDGET,
     DEFAULT_CODING_CONTEXT,
     DEFAULT_DELEGATION_MODE,
     DEFAULT_NATIVE_SUBAGENT_BUDGET,
     DEFAULT_NATIVE_SUBAGENT_COUNT,
     DEFAULT_PHASE_BUDGETS,
+    SINGLE_AGENT_TOPOLOGY,
     BenchmarkError,
     atomic_write_json,
     canonical_model,
@@ -55,7 +58,7 @@ TEMPERATURE = 0.1
 WORKTREE = "/testbed"
 CONDA_ACTIVATION = ". /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed"
 MAX_PHASE_REPORT_CHARS = 20_000
-DELEGATION_TOOL_TIMEOUT_GRACE_SECONDS = 60
+TOOL_TIMEOUT_GRACE_SECONDS = 60
 DELEGATION_GOAL_MARKERS = {
     "navigator": "[benchmark-navigator]",
     "patcher": "[benchmark-patcher]",
@@ -85,6 +88,18 @@ delegation returns synchronously in this benchmark runner. After the reviewer re
 reconcile all reports, inspect the final worktree, make only necessary final
 corrections, run feasible verification, and provide a concise final summary. The
 source edits in /testbed—not prose—are the benchmark answer.
+
+Never seek a gold patch, hidden test patch, benchmark answer, or hidden grading data.
+Do not modify tests or benchmark metadata unless the issue explicitly requires it.
+"""
+
+SINGLE_AGENT_SYSTEM_PROMPT = """You are the sole coding agent for a SWE-bench task.
+
+Work directly in the task worktree and own the complete result. Do not delegate,
+spawn, or simulate child agents. Investigate the issue using repository evidence,
+implement the smallest complete fix, run focused verification when feasible, inspect
+the final diff, and correct any defects you find before answering. The source edits
+in the worktree—not prose—are the benchmark answer.
 
 Never seek a gold patch, hidden test patch, benchmark answer, or hidden grading data.
 Do not modify tests or benchmark metadata unless the issue explicitly requires it.
@@ -145,7 +160,7 @@ def _redact(value: Any, secret: str) -> Any:
 
 def _terminal_config(request: dict[str, Any]) -> dict[str, Any]:
     hermes_home = Path(request["hermesHome"])
-    return {
+    config = {
         "terminal": {
             "backend": "docker",
             "cwd": WORKTREE,
@@ -193,13 +208,15 @@ def _terminal_config(request: dict[str, Any]) -> dict[str, Any]:
             # inject irrelevant repository state into the benchmark prompt.
             "coding_context": DEFAULT_CODING_CONTEXT,
         },
-        "delegation": {
+    }
+    if request.get("agentTopology", DEFAULT_AGENT_TOPOLOGY) == DEFAULT_AGENT_TOPOLOGY:
+        config["delegation"] = {
             "max_iterations": NATIVE_SUBAGENT_BUDGET,
             "max_concurrent_children": 1,
             "max_spawn_depth": 1,
             "orchestrator_enabled": False,
-        },
-    }
+        }
+    return config
 
 
 def configure_worker(request: dict[str, Any]) -> None:
@@ -211,7 +228,7 @@ def configure_worker(request: dict[str, Any]) -> None:
     # agent deadline. This existing internal runtime knob is scoped to the
     # disposable worker process; the controller remains the hard wall clock.
     os.environ["HERMES_CONCURRENT_TOOL_TIMEOUT_S"] = str(
-        int(request["agentTimeoutSeconds"]) + DELEGATION_TOOL_TIMEOUT_GRACE_SECONDS
+        int(request["agentTimeoutSeconds"]) + TOOL_TIMEOUT_GRACE_SECONDS
     )
     config = _terminal_config(request)
     config_path = hermes_home / "config.yaml"
@@ -349,10 +366,10 @@ def default_agent_factory(
     from hermes_constants import OPENROUTER_BASE_URL
     from run_agent import AIAgent
 
-    if role != "coordinator":
-        raise BenchmarkError(
-            "Native benchmark delegation only constructs a coordinator"
-        )
+    topology = request.get("agentTopology", DEFAULT_AGENT_TOPOLOGY)
+    expected_role = "coordinator" if topology == DEFAULT_AGENT_TOPOLOGY else "agent"
+    if role != expected_role:
+        raise BenchmarkError(f"{topology} constructs only the {expected_role}")
     return AIAgent(
         base_url=OPENROUTER_BASE_URL,
         api_key=api_key,
@@ -360,7 +377,11 @@ def default_agent_factory(
         model=provider_model(request["model"]),
         max_iterations=budget,
         tool_delay=0,
-        enabled_toolsets=["terminal", "file", "delegation"],
+        enabled_toolsets=(
+            ["terminal", "file", "delegation"]
+            if topology == DEFAULT_AGENT_TOPOLOGY
+            else ["terminal", "file"]
+        ),
         save_trajectories=False,
         verbose_logging=False,
         quiet_mode=True,
@@ -410,6 +431,10 @@ def create_trace_adapter(request: dict[str, Any]) -> Any | None:
         agent_timeout_seconds=int(request["agentTimeoutSeconds"]),
         evaluation_workers=1,
         evaluation_timeout_seconds=value["evaluationTimeoutSeconds"],
+        delegation_enabled=(
+            request.get("agentTopology", DEFAULT_AGENT_TOPOLOGY)
+            == DEFAULT_AGENT_TOPOLOGY
+        ),
     )
 
 
@@ -430,6 +455,8 @@ def reconciled_workflow(
 
 
 def _runtime_metadata(request: dict[str, Any], env: Any) -> dict[str, Any]:
+    topology = request.get("agentTopology", DEFAULT_AGENT_TOPOLOGY)
+    delegated = topology == DEFAULT_AGENT_TOPOLOGY
     return {
         "schemaVersion": 1,
         "benchmark": WORKER_BENCHMARK,
@@ -441,12 +468,19 @@ def _runtime_metadata(request: dict[str, Any], env: Any) -> dict[str, Any]:
         "agentStartedAt": utc_now(),
         "credentialEnvironmentNames": ["OPENROUTER_API_KEY"],
         "dockerForwardEnvironment": [],
-        "delegationToolTimeoutSeconds": (
-            int(request["agentTimeoutSeconds"]) + DELEGATION_TOOL_TIMEOUT_GRACE_SECONDS
+        "toolTimeoutSeconds": (
+            int(request["agentTimeoutSeconds"]) + TOOL_TIMEOUT_GRACE_SECONDS
         ),
-        "delegationMode": DEFAULT_DELEGATION_MODE,
-        "nativeSubagentBudget": NATIVE_SUBAGENT_BUDGET,
-        "nativeSubagentCount": NATIVE_SUBAGENT_COUNT,
+        "delegationToolTimeoutSeconds": (
+            int(request["agentTimeoutSeconds"]) + TOOL_TIMEOUT_GRACE_SECONDS
+            if delegated
+            else None
+        ),
+        "agentTopology": topology,
+        "primaryAgentRole": "coordinator" if delegated else "agent",
+        "delegationMode": DEFAULT_DELEGATION_MODE if delegated else "disabled",
+        "nativeSubagentBudget": NATIVE_SUBAGENT_BUDGET if delegated else None,
+        "nativeSubagentCount": NATIVE_SUBAGENT_COUNT if delegated else 0,
     }
 
 
@@ -457,6 +491,14 @@ def run_worker(
 ) -> dict[str, Any]:
     if request.get("benchmark") != WORKER_BENCHMARK:
         raise BenchmarkError("Worker request benchmark does not match")
+    if request.get("agentTopology", DEFAULT_AGENT_TOPOLOGY) not in {
+        DEFAULT_AGENT_TOPOLOGY,
+        SINGLE_AGENT_TOPOLOGY,
+    }:
+        raise BenchmarkError("Worker request has an unsupported agent topology")
+    topology = request.get("agentTopology", DEFAULT_AGENT_TOPOLOGY)
+    delegated = topology == DEFAULT_AGENT_TOPOLOGY
+    primary_role = "coordinator" if delegated else "agent"
     row = ROW_PARSER(request.get("row"))
     if canonical_model(str(request.get("model") or "")) != request.get("model"):
         raise BenchmarkError("Worker request model must be canonical")
@@ -515,7 +557,7 @@ def run_worker(
         # one-shot mode makes native delegate_task calls return synchronously.
         declare_stateless_channel()
         agent_options: dict[str, Any] = {
-            "role": "coordinator",
+            "role": primary_role,
             "budget": COORDINATOR_BUDGET,
             "api_key": api_key,
             "request": request,
@@ -526,10 +568,12 @@ def run_worker(
             **agent_options,
         )
         if trace_adapter is not None:
-            trace_adapter.start_session(f"{request['taskId']}-coordinator")
+            trace_adapter.start_session(f"{request['taskId']}-{primary_role}")
         coordinator_result = coordinator.run_conversation(
             request["prompt"],
-            system_message=COORDINATOR_SYSTEM_PROMPT,
+            system_message=(
+                COORDINATOR_SYSTEM_PROMPT if delegated else SINGLE_AGENT_SYSTEM_PROMPT
+            ),
             task_id=request["taskId"],
         )
         if termination_requested.is_set():
@@ -569,9 +613,19 @@ def run_worker(
             signal.signal(signal.SIGTERM, previous_sigterm)
             signal.signal(signal.SIGINT, previous_sigint)
 
-    records, audit_errors = audit_native_delegations(coordinator_result.get("messages"))
-    workflow_complete = reconciled_workflow(
-        records, audit_errors, coordinator_result, error
+    records, audit_errors = (
+        audit_native_delegations(coordinator_result.get("messages"))
+        if delegated
+        else ([], [])
+    )
+    workflow_complete = (
+        reconciled_workflow(records, audit_errors, coordinator_result, error)
+        if delegated
+        else bool(
+            coordinator_result.get("completed")
+            and not coordinator_result.get("interrupted")
+            and not error
+        )
     )
     trace_result = None
     if trace_adapter is not None:
@@ -615,15 +669,20 @@ def run_worker(
         "sourceIdentity": source_identity,
         "agentTimeoutSeconds": request["agentTimeoutSeconds"],
         "coordinatorBudget": COORDINATOR_BUDGET,
-        "delegationMode": DEFAULT_DELEGATION_MODE,
-        "nativeSubagentBudget": NATIVE_SUBAGENT_BUDGET,
-        "nativeSubagentCount": NATIVE_SUBAGENT_COUNT,
-        "peerPhaseBudgetReference": PEER_PHASE_BUDGETS,
-        "phaseOrder": list(PHASE_ORDER),
+        "agentBudget": COORDINATOR_BUDGET,
+        "agentTopology": topology,
+        "primaryAgentRole": primary_role,
+        "agentSequence": (["coordinator", *PHASE_ORDER] if delegated else ["agent"]),
+        "delegationEnabled": delegated,
+        "delegationMode": DEFAULT_DELEGATION_MODE if delegated else "disabled",
+        "nativeSubagentBudget": NATIVE_SUBAGENT_BUDGET if delegated else None,
+        "nativeSubagentCount": NATIVE_SUBAGENT_COUNT if delegated else 0,
+        "peerPhaseBudgetReference": PEER_PHASE_BUDGETS if delegated else None,
+        "phaseOrder": list(PHASE_ORDER) if delegated else ["agent"],
         "workflowComplete": workflow_complete,
         "delegationAuditErrors": audit_errors,
         "phases": records,
-        "coordinator": {
+        primary_role: {
             "completed": bool(coordinator_result.get("completed")),
             "interrupted": bool(coordinator_result.get("interrupted")),
             "apiCalls": coordinator_result.get("api_calls", 0),
@@ -688,12 +747,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:
         if result_path is not None:
             secret = os.environ.get("OPENROUTER_API_KEY", "")
+            topology = request.get("agentTopology", DEFAULT_AGENT_TOPOLOGY)
+            delegated = topology == DEFAULT_AGENT_TOPOLOGY
             atomic_write_json(
                 result_path,
                 _redact(
                     {
                         "schemaVersion": 1,
                         "benchmark": WORKER_BENCHMARK,
+                        "agentTopology": topology,
+                        "primaryAgentRole": "coordinator" if delegated else "agent",
+                        "agentSequence": (
+                            ["coordinator", *PHASE_ORDER] if delegated else ["agent"]
+                        ),
+                        "delegationEnabled": delegated,
+                        "delegationMode": (
+                            DEFAULT_DELEGATION_MODE if delegated else "disabled"
+                        ),
                         "modelPatch": None,
                         "changedPaths": [],
                         "workflowComplete": False,

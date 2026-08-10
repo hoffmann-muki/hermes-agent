@@ -28,15 +28,12 @@ from typing import Any, Callable, Iterable, Protocol, Sequence
 import httpx
 
 
-BENCHMARK = "swe-bench-verified"
-DATASET_NAME = "princeton-nlp/SWE-bench_Verified"
 DATASET_CONFIG = "default"
 DATASET_SPLIT = "test"
 DATASET_ROWS_URL = "https://datasets-server.huggingface.co/rows"
-DEFAULT_SMOKE_INSTANCE_ID = "scikit-learn__scikit-learn-13439"
 DEFAULT_MODEL = "openrouter/qwen/qwen3-coder-next"
+SINGLE_AGENT_DEFAULT_MODEL = "openrouter/poolside/laguna-s-2.1:free"
 DEFAULT_IMAGE_TEMPLATE = "docker.io/swebench/sweb.eval.x86_64.{repo}_1776_{name}:latest"
-DEFAULT_OUTPUT_DIR = ".benchmark-runs/swe-bench-verified"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TRACE_DIR = REPO_ROOT / ".benchmark-traces"
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
@@ -53,6 +50,8 @@ DEFAULT_COORDINATOR_BUDGET = 24
 DEFAULT_PHASE_BUDGETS = {"navigator": 10, "patcher": 18, "reviewer": 12}
 DEFAULT_AGENT_SEQUENCE = ("coordinator", *DEFAULT_PHASE_BUDGETS)
 DEFAULT_DELEGATION_MODE = "native"
+DEFAULT_AGENT_TOPOLOGY = "supervisor-delegation"
+SINGLE_AGENT_TOPOLOGY = "single-agent"
 DEFAULT_NATIVE_SUBAGENT_COUNT = len(DEFAULT_PHASE_BUDGETS)
 # Hermes' native delegate_task uses one configured cap for every child. Three
 # children at 13 iterations preserve the peers' 40-iteration combined phase
@@ -75,6 +74,47 @@ SAFE_DATASET_FIELDS = frozenset({
     "hints_text",
     "difficulty",
 })
+
+
+@dataclass(frozen=True)
+class ClassicSweBenchVariant:
+    benchmark: str
+    display_name: str
+    dataset_name: str
+    default_smoke_instance_id: str
+    default_output_dir: str
+    run_id_prefix: str
+    cli_name: str
+    worker_module: str
+
+
+SWE_BENCH_VERIFIED = ClassicSweBenchVariant(
+    benchmark="swe-bench-verified",
+    display_name="SWE-bench Verified",
+    dataset_name="princeton-nlp/SWE-bench_Verified",
+    default_smoke_instance_id="scikit-learn__scikit-learn-13439",
+    default_output_dir=".benchmark-runs/swe-bench-verified",
+    run_id_prefix="swe-verified",
+    cli_name="hermes-swebench-verified",
+    worker_module="hermes_cli.benchmarks.swebench_verified_worker",
+)
+SWE_BENCH_LITE = ClassicSweBenchVariant(
+    benchmark="swe-bench-lite",
+    display_name="SWE-bench Lite",
+    dataset_name="princeton-nlp/SWE-bench_Lite",
+    default_smoke_instance_id="astropy__astropy-12907",
+    default_output_dir=".benchmark-runs/swe-bench-lite",
+    run_id_prefix="swe-lite",
+    cli_name="hermes-swebench-lite",
+    worker_module="hermes_cli.benchmarks.swebench_lite_worker",
+)
+
+# Compatibility aliases for the established Verified integration and the Pro
+# runner's imports. New classic SWE-bench paths carry their variant explicitly.
+BENCHMARK = SWE_BENCH_VERIFIED.benchmark
+DATASET_NAME = SWE_BENCH_VERIFIED.dataset_name
+DEFAULT_SMOKE_INSTANCE_ID = SWE_BENCH_VERIFIED.default_smoke_instance_id
+DEFAULT_OUTPUT_DIR = SWE_BENCH_VERIFIED.default_output_dir
 
 
 class BenchmarkError(RuntimeError):
@@ -146,6 +186,8 @@ class InferenceOptions:
     dry_run: bool
     trace_dir: Path | None = None
     source_identity: dict[str, Any] | None = None
+    variant: ClassicSweBenchVariant = SWE_BENCH_VERIFIED
+    agent_topology: str = DEFAULT_AGENT_TOPOLOGY
 
 
 class SourceIdentityOptions(Protocol):
@@ -197,9 +239,9 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def default_run_id() -> str:
+def default_run_id(variant: ClassicSweBenchVariant = SWE_BENCH_VERIFIED) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%fZ")
-    return f"swe-verified-{stamp}"
+    return f"{variant.run_id_prefix}-{stamp}"
 
 
 def docker_task_id(run_id: str, instance_id: str) -> str:
@@ -339,25 +381,46 @@ def _redact_secret(value: Any, secret: str) -> Any:
     return value
 
 
-def build_prompt(row: SweBenchRow, include_hints: bool) -> str:
+def build_prompt(
+    row: SweBenchRow,
+    include_hints: bool,
+    *,
+    variant: ClassicSweBenchVariant = SWE_BENCH_VERIFIED,
+    agent_topology: str = DEFAULT_AGENT_TOPOLOGY,
+) -> str:
     lines = [
-        "Resolve this SWE-bench Verified issue using Hermes Agent.",
+        f"Resolve this {variant.display_name} issue using Hermes Agent.",
         "",
         "You are running inside the official SWE-bench task image at /testbed.",
         "Edit repository files directly; do not merely describe a patch.",
         "Do not seek or use gold patches, hidden tests, or benchmark answer artifacts.",
         "Do not modify tests or benchmark metadata unless the issue explicitly requires it.",
         "",
-        "The benchmark coordinator must use Hermes-native delegation for one fresh",
-        "leaf agent at a time in this order: navigator, patcher, reviewer. It then",
-        "reconciles their reports and leaves final changes in the shared worktree.",
-        "",
+    ]
+    if agent_topology == DEFAULT_AGENT_TOPOLOGY:
+        lines.extend([
+            "The benchmark coordinator must use Hermes-native delegation for one fresh",
+            "leaf agent at a time in this order: navigator, patcher, reviewer. It then",
+            "reconciles their reports and leaves final changes in the shared worktree.",
+            "",
+        ])
+    elif agent_topology == SINGLE_AGENT_TOPOLOGY:
+        lines.extend([
+            "You are the sole coding agent. Do not delegate or create child agents.",
+            "Personally investigate the issue, implement the smallest complete fix,",
+            "run focused verification, inspect the final diff, and correct any defects",
+            "you find before returning the result.",
+            "",
+        ])
+    else:
+        raise BenchmarkError(f"Unsupported agent topology: {agent_topology}")
+    lines.extend([
         "## Repository",
         "Worktree: /testbed",
         f"Repo: {row.repo}",
         f"Base commit: {row.base_commit}",
         f"Instance id: {row.instance_id}",
-    ]
+    ])
     if row.difficulty:
         lines.append(f"Difficulty: {row.difficulty}")
     lines.append("")
@@ -382,9 +445,11 @@ class DatasetRowsClient:
     def __init__(
         self,
         *,
+        variant: ClassicSweBenchVariant = SWE_BENCH_VERIFIED,
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        self._variant = variant
         self._client = client or httpx.Client(timeout=60)
         self._owns_client = client is None
         self._sleep = sleep
@@ -401,7 +466,7 @@ class DatasetRowsClient:
 
     def page(self, offset: int, length: int) -> list[SweBenchRow]:
         params = {
-            "dataset": DATASET_NAME,
+            "dataset": self._variant.dataset_name,
             "config": DATASET_CONFIG,
             "split": DATASET_SPLIT,
             "offset": offset,
@@ -1037,6 +1102,7 @@ def _run_worker(
     worktree: str = "/testbed",
     evaluation_timeout_seconds: int = DEFAULT_EVALUATION_TIMEOUT_SECONDS,
     trace_run: TraceRunOptions | None = None,
+    agent_topology: str = DEFAULT_AGENT_TOPOLOGY,
 ) -> dict[str, Any]:
     instance_dir.mkdir(parents=True, exist_ok=True)
     worker_home = instance_dir / "hermes-home"
@@ -1071,6 +1137,7 @@ def _run_worker(
         "agentTimeoutSeconds": options.agent_timeout_seconds,
         "attempt": 1,
         "maxInfrastructureRetries": DEFAULT_INFRASTRUCTURE_RETRIES,
+        "agentTopology": agent_topology,
         "sourceIdentity": _source_identity_for_options(options),
     }
     if trace_run is not None:
@@ -1314,6 +1381,11 @@ def _instance_summary(
         "semanticRetriesUsed": 0,
         "timedOut": bool(result.get("timedOut")),
         "workflowComplete": bool(result.get("workflowComplete")),
+        "agentTopology": result.get("agentTopology"),
+        "primaryAgentRole": result.get("primaryAgentRole"),
+        "agentSequence": result.get("agentSequence"),
+        "delegationEnabled": result.get("delegationEnabled"),
+        "delegationMode": result.get("delegationMode"),
         "generationSucceeded": (
             not result.get("error")
             and not result.get("timedOut")
@@ -1344,8 +1416,9 @@ def _manifest(
     content = encode_jsonl(predictions)
     return {
         "schemaVersion": MANIFEST_SCHEMA_VERSION,
-        "benchmark": BENCHMARK,
-        "dataset": DATASET_NAME,
+        "benchmark": options.variant.benchmark,
+        "benchmarkDisplayName": options.variant.display_name,
+        "dataset": options.variant.dataset_name,
         "datasetConfig": DATASET_CONFIG,
         "datasetSplit": DATASET_SPLIT,
         "runId": options.run_id,
@@ -1365,14 +1438,37 @@ def _manifest(
         "codingContext": DEFAULT_CODING_CONTEXT,
         "agentTimeoutSeconds": options.agent_timeout_seconds,
         "setupTimeoutSeconds": options.setup_timeout_seconds,
-        "agentSequence": list(DEFAULT_AGENT_SEQUENCE),
-        "agentBudgets": {
-            "coordinator": DEFAULT_COORDINATOR_BUDGET,
-            "nativeSubagent": DEFAULT_NATIVE_SUBAGENT_BUDGET,
-            "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
-        },
-        "delegationMode": DEFAULT_DELEGATION_MODE,
-        "peerPhaseBudgetReference": DEFAULT_PHASE_BUDGETS,
+        "agentTopology": options.agent_topology,
+        "primaryAgentRole": (
+            "coordinator"
+            if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+            else "agent"
+        ),
+        "delegationEnabled": options.agent_topology == DEFAULT_AGENT_TOPOLOGY,
+        "agentSequence": (
+            list(DEFAULT_AGENT_SEQUENCE)
+            if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+            else ["agent"]
+        ),
+        "agentBudgets": (
+            {
+                "coordinator": DEFAULT_COORDINATOR_BUDGET,
+                "nativeSubagent": DEFAULT_NATIVE_SUBAGENT_BUDGET,
+                "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
+            }
+            if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+            else {"singleAgent": DEFAULT_COORDINATOR_BUDGET}
+        ),
+        "delegationMode": (
+            DEFAULT_DELEGATION_MODE
+            if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+            else "disabled"
+        ),
+        "peerPhaseBudgetReference": (
+            DEFAULT_PHASE_BUDGETS
+            if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+            else None
+        ),
         "selectedInstances": [
             {
                 "instanceId": row.instance_id,
@@ -1414,8 +1510,8 @@ def _write_progress(
         paths.summary,
         {
             "runId": options.run_id,
-            "benchmark": BENCHMARK,
-            "dataset": DATASET_NAME,
+            "benchmark": options.variant.benchmark,
+            "dataset": options.variant.dataset_name,
             "model": canonical_model(options.model),
             "selectedCount": len(rows),
             "completedCount": len(predictions),
@@ -1464,9 +1560,9 @@ def _load_resume(
     mismatches = []
     if manifest.get("schemaVersion") != MANIFEST_SCHEMA_VERSION:
         mismatches.append("manifest schema")
-    if manifest.get("benchmark") != BENCHMARK:
+    if manifest.get("benchmark") != options.variant.benchmark:
         mismatches.append("benchmark")
-    if manifest.get("dataset") != DATASET_NAME:
+    if manifest.get("dataset") != options.variant.dataset_name:
         mismatches.append("dataset")
     if manifest.get("datasetConfig") != DATASET_CONFIG:
         mismatches.append("dataset config")
@@ -1508,17 +1604,39 @@ def _load_resume(
         mismatches.append("API retry policy")
     if manifest.get("codingContext") != DEFAULT_CODING_CONTEXT:
         mismatches.append("coding context")
-    if manifest.get("agentSequence") != list(DEFAULT_AGENT_SEQUENCE):
+    expected_sequence = (
+        list(DEFAULT_AGENT_SEQUENCE)
+        if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+        else ["agent"]
+    )
+    if manifest.get("agentTopology") != options.agent_topology:
+        mismatches.append("agent topology")
+    if manifest.get("agentSequence") != expected_sequence:
         mismatches.append("agent sequence")
-    if manifest.get("agentBudgets") != {
-        "coordinator": DEFAULT_COORDINATOR_BUDGET,
-        "nativeSubagent": DEFAULT_NATIVE_SUBAGENT_BUDGET,
-        "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
-    }:
+    expected_budgets = (
+        {
+            "coordinator": DEFAULT_COORDINATOR_BUDGET,
+            "nativeSubagent": DEFAULT_NATIVE_SUBAGENT_BUDGET,
+            "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
+        }
+        if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+        else {"singleAgent": DEFAULT_COORDINATOR_BUDGET}
+    )
+    if manifest.get("agentBudgets") != expected_budgets:
         mismatches.append("agent budgets")
-    if manifest.get("delegationMode") != DEFAULT_DELEGATION_MODE:
+    expected_delegation_mode = (
+        DEFAULT_DELEGATION_MODE
+        if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+        else "disabled"
+    )
+    if manifest.get("delegationMode") != expected_delegation_mode:
         mismatches.append("delegation mode")
-    if manifest.get("peerPhaseBudgetReference") != DEFAULT_PHASE_BUDGETS:
+    expected_phase_budgets = (
+        DEFAULT_PHASE_BUDGETS
+        if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+        else None
+    )
+    if manifest.get("peerPhaseBudgetReference") != expected_phase_budgets:
         mismatches.append("peer phase budget reference")
     if mismatches:
         raise BenchmarkError(
@@ -1601,9 +1719,11 @@ def run_inference(
     validate_run_id(options.run_id)
     validate_docker_platform(options.docker_platform)
     canonical_model(options.model)
-    official_image(DEFAULT_SMOKE_INSTANCE_ID, options.image_template)
+    if options.agent_topology not in {DEFAULT_AGENT_TOPOLOGY, SINGLE_AGENT_TOPOLOGY}:
+        raise BenchmarkError(f"Unsupported agent topology: {options.agent_topology}")
+    official_image(options.variant.default_smoke_instance_id, options.image_template)
     owned_client = dataset_client is None
-    client = dataset_client or DatasetRowsClient()
+    client = dataset_client or DatasetRowsClient(variant=options.variant)
     try:
         rows = client.select(
             options.instance_ids,
@@ -1623,7 +1743,8 @@ def run_inference(
                 {
                     "mode": "inference",
                     "runId": options.run_id,
-                    "dataset": DATASET_NAME,
+                    "benchmark": options.variant.benchmark,
+                    "dataset": options.variant.dataset_name,
                     "instanceIds": [row.instance_id for row in rows],
                     "model": canonical_model(options.model),
                     "sourceIdentity": _source_identity_for_options(options),
@@ -1635,15 +1756,40 @@ def run_inference(
                     "codingContext": DEFAULT_CODING_CONTEXT,
                     "agentTimeoutSeconds": options.agent_timeout_seconds,
                     "setupTimeoutSeconds": options.setup_timeout_seconds,
-                    "sequence": list(DEFAULT_AGENT_SEQUENCE),
-                    "delegationMode": DEFAULT_DELEGATION_MODE,
-                    "coordinatorBudget": DEFAULT_COORDINATOR_BUDGET,
-                    "nativeSubagentBudget": DEFAULT_NATIVE_SUBAGENT_BUDGET,
-                    "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
-                    "nativeSubagentTotalBudget": (
-                        DEFAULT_NATIVE_SUBAGENT_BUDGET * DEFAULT_NATIVE_SUBAGENT_COUNT
+                    "agentTopology": options.agent_topology,
+                    "primaryAgentRole": (
+                        "coordinator"
+                        if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+                        else "agent"
                     ),
-                    "peerPhaseBudgetReference": DEFAULT_PHASE_BUDGETS,
+                    "delegationEnabled": (
+                        options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+                    ),
+                    "sequence": (
+                        list(DEFAULT_AGENT_SEQUENCE)
+                        if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+                        else ["agent"]
+                    ),
+                    "delegationMode": (
+                        DEFAULT_DELEGATION_MODE
+                        if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+                        else "disabled"
+                    ),
+                    "agentBudget": DEFAULT_COORDINATOR_BUDGET,
+                    **(
+                        {
+                            "coordinatorBudget": DEFAULT_COORDINATOR_BUDGET,
+                            "nativeSubagentBudget": DEFAULT_NATIVE_SUBAGENT_BUDGET,
+                            "nativeSubagentCount": DEFAULT_NATIVE_SUBAGENT_COUNT,
+                            "nativeSubagentTotalBudget": (
+                                DEFAULT_NATIVE_SUBAGENT_BUDGET
+                                * DEFAULT_NATIVE_SUBAGENT_COUNT
+                            ),
+                            "peerPhaseBudgetReference": DEFAULT_PHASE_BUDGETS,
+                        }
+                        if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+                        else {}
+                    ),
                     "images": [
                         official_image(row.instance_id, options.image_template)
                         for row in rows
@@ -1690,7 +1836,7 @@ def run_inference(
 
         trace_run = create_trace_run(
             options.trace_dir,
-            benchmark=BENCHMARK,
+            benchmark=options.variant.benchmark,
             framework="hermes",
         )
         require_unchanged_source(options)
@@ -1707,22 +1853,34 @@ def run_inference(
             )
             image_metadata["docker"] = docker_metadata
             require_unchanged_source(options)
-            if trace_run is None:
-                result = _run_worker(options, row, instance_dir, image, image_metadata)
-            else:
-                result = _run_worker(
-                    options,
-                    row,
-                    instance_dir,
-                    image,
-                    image_metadata,
-                    trace_run=trace_run,
-                )
+            result = _run_worker(
+                options,
+                row,
+                instance_dir,
+                image,
+                image_metadata,
+                benchmark=options.variant.benchmark,
+                worker_module=options.variant.worker_module,
+                prompt_builder=lambda selected_row, include_hints: build_prompt(
+                    selected_row,
+                    include_hints,
+                    variant=options.variant,
+                    agent_topology=options.agent_topology,
+                ),
+                trace_run=trace_run,
+                agent_topology=options.agent_topology,
+            )
         except Exception as exc:
             result = {
                 "modelPatch": "",
                 "changedPaths": [],
                 "workflowComplete": False,
+                "agentTopology": options.agent_topology,
+                "delegationMode": (
+                    DEFAULT_DELEGATION_MODE
+                    if options.agent_topology == DEFAULT_AGENT_TOPOLOGY
+                    else "disabled"
+                ),
                 "timedOut": False,
                 "error": f"{type(exc).__name__}: {exc}",
                 "controllerStartedAt": utc_now(),
@@ -1777,7 +1935,10 @@ def run_inference(
 
 
 def verify_prediction_artifact(
-    predictions_path: Path, manifest_path: Path
+    predictions_path: Path,
+    manifest_path: Path,
+    *,
+    variant: ClassicSweBenchVariant = SWE_BENCH_VERIFIED,
 ) -> tuple[dict[str, Any], list[dict[str, str]], str]:
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1788,15 +1949,15 @@ def verify_prediction_artifact(
         raise BenchmarkError("Prediction manifest must be a JSON object")
     if (
         manifest.get("schemaVersion") != MANIFEST_SCHEMA_VERSION
-        or manifest.get("benchmark") != BENCHMARK
-        or manifest.get("dataset") != DATASET_NAME
+        or manifest.get("benchmark") != variant.benchmark
+        or manifest.get("dataset") != variant.dataset_name
         or manifest.get("datasetConfig") != DATASET_CONFIG
         or manifest.get("datasetSplit") != DATASET_SPLIT
         or manifest.get("framework") != "hermes-agent"
         or not manifest.get("complete")
     ):
         raise BenchmarkError(
-            "Prediction manifest is not a complete SWE-bench Verified run"
+            f"Prediction manifest is not a complete {variant.display_name} run"
         )
     digest = sha256_text(content)
     if digest != manifest.get("predictionsSha256"):
@@ -1838,13 +1999,14 @@ def build_evaluation_command(
     instance_ids: Sequence[str],
     *,
     namespace_empty: bool,
+    variant: ClassicSweBenchVariant = SWE_BENCH_VERIFIED,
 ) -> list[str]:
     command = [
         python,
         "-m",
         "swebench.harness.run_evaluation",
         "--dataset_name",
-        DATASET_NAME,
+        variant.dataset_name,
         "--split",
         DATASET_SPLIT,
         "--predictions_path",
@@ -1925,6 +2087,7 @@ def cleanup_evaluation_containers(
 
 
 def run_evaluation(args: argparse.Namespace) -> None:
+    variant = getattr(args, "variant", SWE_BENCH_VERIFIED)
     validate_run_id(args.run_id)
     output_dir = Path(args.output_dir).resolve()
     run_dir = output_dir / "runs" / args.run_id
@@ -1939,7 +2102,7 @@ def run_evaluation(args: argparse.Namespace) -> None:
         else run_dir / "prediction-manifest.json"
     )
     manifest, predictions, digest = verify_prediction_artifact(
-        predictions_path, manifest_path
+        predictions_path, manifest_path, variant=variant
     )
     if manifest.get("runId") != args.run_id:
         raise BenchmarkError("Prediction manifest run id does not match --run-id")
@@ -1960,6 +2123,7 @@ def run_evaluation(args: argparse.Namespace) -> None:
         args.run_id,
         requested_ids,
         namespace_empty=args.namespace_empty,
+        variant=variant,
     )
     if args.dry_run:
         print(
@@ -2001,8 +2165,8 @@ def run_evaluation(args: argparse.Namespace) -> None:
     started_at = utc_now()
     evaluation_record = {
         "schemaVersion": 1,
-        "benchmark": BENCHMARK,
-        "dataset": DATASET_NAME,
+        "benchmark": variant.benchmark,
+        "dataset": variant.dataset_name,
         "runId": args.run_id,
         "predictionsPath": str(predictions_path),
         "predictionManifestPath": str(manifest_path),
@@ -2093,21 +2257,38 @@ def _nonnegative_int(value: str) -> int:
     return parsed
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(
+    variant: ClassicSweBenchVariant = SWE_BENCH_VERIFIED,
+    agent_topology: str = DEFAULT_AGENT_TOPOLOGY,
+) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="hermes-swebench-verified",
-        description="Run Hermes Agent on SWE-bench Verified with local Docker evaluation.",
+        prog=(
+            f"{variant.cli_name}-single"
+            if agent_topology == SINGLE_AGENT_TOPOLOGY
+            else variant.cli_name
+        ),
+        description=(
+            f"Run Hermes Agent on {variant.display_name} with local Docker evaluation."
+        ),
     )
+    parser.set_defaults(variant=variant, agent_topology=agent_topology)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     infer = subparsers.add_parser("infer", help="Generate SWE-bench predictions")
-    infer.add_argument("--run-id", default=default_run_id())
-    infer.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    infer.add_argument("--run-id", default=default_run_id(variant))
+    infer.add_argument("--output-dir", default=variant.default_output_dir)
     infer.add_argument("--instance-id", action="append", default=[])
     infer.add_argument("--max-instances", type=_positive_int)
     infer.add_argument("--offset", type=_nonnegative_int)
     infer.add_argument("--include-hints", action="store_true")
-    infer.add_argument("--model", default=DEFAULT_MODEL)
+    infer.add_argument(
+        "--model",
+        default=(
+            SINGLE_AGENT_DEFAULT_MODEL
+            if agent_topology == SINGLE_AGENT_TOPOLOGY
+            else DEFAULT_MODEL
+        ),
+    )
     infer.add_argument("--image-template", default=DEFAULT_IMAGE_TEMPLATE)
     infer.add_argument("--docker-platform", default=DEFAULT_DOCKER_PLATFORM)
     infer.add_argument(
@@ -2144,7 +2325,7 @@ def build_parser() -> argparse.ArgumentParser:
         "evaluate", aliases=["eval"], help="Run the pinned official local evaluator"
     )
     evaluate.add_argument("--run-id", required=True)
-    evaluate.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    evaluate.add_argument("--output-dir", default=variant.default_output_dir)
     evaluate.add_argument("--predictions-path")
     evaluate.add_argument("--manifest-path")
     evaluate.add_argument("--instance-id", action="append", default=[])
@@ -2167,7 +2348,7 @@ def options_from_args(args: argparse.Namespace) -> InferenceOptions:
     )
     instance_ids = tuple(args.instance_id)
     if not explicit_selection:
-        instance_ids = (DEFAULT_SMOKE_INSTANCE_ID,)
+        instance_ids = (args.variant.default_smoke_instance_id,)
     return InferenceOptions(
         run_id=args.run_id,
         output_dir=Path(args.output_dir),
@@ -2183,11 +2364,18 @@ def options_from_args(args: argparse.Namespace) -> InferenceOptions:
         restart=args.restart,
         dry_run=args.dry_run,
         trace_dir=args.trace_dir,
+        variant=args.variant,
+        agent_topology=args.agent_topology,
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    variant: ClassicSweBenchVariant = SWE_BENCH_VERIFIED,
+    agent_topology: str = DEFAULT_AGENT_TOPOLOGY,
+) -> int:
+    parser = build_parser(variant, agent_topology)
     args = parser.parse_args(argv)
 
     def terminate(signum: int, _frame: Any) -> None:
@@ -2203,7 +2391,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command in {"evaluate", "eval"}:
             run_evaluation(args)
             return 0
-        with DatasetRowsClient() as client:
+        with DatasetRowsClient(variant=args.variant) as client:
             rows = client.select(
                 tuple(args.instance_id),
                 offset=args.offset,
@@ -2229,6 +2417,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 130
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
+
+
+def swebench_verified_single_main(argv: Sequence[str] | None = None) -> int:
+    return main(argv, agent_topology=SINGLE_AGENT_TOPOLOGY)
+
+
+def swebench_lite_single_main(argv: Sequence[str] | None = None) -> int:
+    return main(argv, variant=SWE_BENCH_LITE, agent_topology=SINGLE_AGENT_TOPOLOGY)
 
 
 if __name__ == "__main__":
