@@ -1,0 +1,33 @@
+I've reached the iteration limit, so let me provide a summary of what was accomplished.
+
+## Summary
+
+### Problem
+The `Pipeline` class in scikit-learn did not implement `__len__`, so calling `len(pipe)` raised a `TypeError`. This was particularly problematic with the new indexing support, where `pipe[:len(pipe)]` would fail because `len(pipe)` couldn't be computed.
+
+### Changes Made
+
+**1. `/testbed/sklearn/pipeline.py`** — Added a `__len__` method to the `Pipeline` class, placed right after the `__getitem__` method:
+
+```python
+def __len__(self):
+    """Return the number of steps in the pipeline."""
+    return len(self.steps)
+```
+
+This delegates to the length of the `steps` list, which is the natural definition of a pipeline's length (the number of steps).
+
+**2. `/testbed/sklearn/tests/test_pipeline.py`** — Added a `test_pipeline_len` test function after `test_pipeline_index` that verifies:
+- `len(pipe)` returns the correct number of steps
+- `len(pipe[:1])` works (sub-pipeline slicing + len)
+- `len(pipe[:-1])` works (negative slice + len)
+
+### Verification
+I verified the fix using the exact reproduction code from the issue:
+- `len(pipe)` returned `2` (previously raised `TypeError`)
+- `pipe[:len(pipe)]` now works correctly, returning a full copy of the pipeline
+- Slicing operations like `pipe[:1]`, `pipe[-1]` continue to work as expected
+
+### Residual Risk
+- The `__len__` implementation is minimal and delegates to `len(self.steps)`, which is consistent with the `__getitem__` behavior that indexes into `self.steps` — so the two are consistent.
+- The fix follows the same pattern used in `_BaseComposition` for `FeatureUnion` (which also uses a list-based composition and supports slicing/indexing). No `FeatureUnion` changes were needed since the issue is specific to `Pipeline`, though `FeatureUnion` may have a similar gap — however, the issue specifically targets `Pipeline`.

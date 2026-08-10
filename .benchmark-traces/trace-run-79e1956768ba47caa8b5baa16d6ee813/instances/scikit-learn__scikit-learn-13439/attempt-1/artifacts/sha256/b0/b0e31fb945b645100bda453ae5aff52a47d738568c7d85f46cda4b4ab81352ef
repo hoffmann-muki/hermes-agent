@@ -1,0 +1,1 @@
+Now I'll add a test for `__len__` right after `test_pipeline_index`:

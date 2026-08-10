@@ -1,0 +1,1 @@
+{"output_mode":"content","path":"/testbed/sklearn/tests/test_pipeline.py","pattern":"__getitem__|__len__|def test.*index|def test.*slice|def test.*len"}

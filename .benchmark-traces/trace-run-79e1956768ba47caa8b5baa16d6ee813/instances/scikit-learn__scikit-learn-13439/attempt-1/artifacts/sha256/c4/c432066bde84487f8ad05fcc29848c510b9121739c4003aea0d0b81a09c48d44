@@ -1,0 +1,1 @@
+{"command":"cd /testbed && sed -n '543,560p' sklearn/tests/test_pipeline.py | cat -A | head -30","mode":"foreground"}

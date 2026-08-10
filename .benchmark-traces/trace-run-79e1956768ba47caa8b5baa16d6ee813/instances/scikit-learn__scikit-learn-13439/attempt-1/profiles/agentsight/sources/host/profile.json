@@ -1,0 +1,43 @@
+{
+  "schema": "agentsight-profile/v1",
+  "profile_id": "trace-f4495e64d312470eb1e0fda5c049060c",
+  "scope_id": "host",
+  "capture_level": "research",
+  "status": "completed",
+  "started_at_ms": 1786335182938,
+  "ready_at_ms": 1786335185779,
+  "ended_at_ms": 1786335317861,
+  "target": {
+    "pid": 61226,
+    "session_id": null,
+    "comm": null,
+    "cgroup": null,
+    "pid_namespace": null,
+    "binary_path": "/home/hoffmann_muki/.local/share/uv/python/cpython-3.13.14-linux-x86_64-gnu/bin/python3.13",
+    "tls_binary_only": true
+  },
+  "sources": {
+    "tls": true,
+    "process": true,
+    "stdio": true,
+    "system": true,
+    "filesystem": true,
+    "network": true,
+    "signals": true,
+    "memory": true,
+    "copy_on_write": false,
+    "stdio_max_bytes": 65536,
+    "system_interval_seconds": 2
+  },
+  "artifacts": {
+    "database": "capture.db",
+    "evidence_journal": "system-events.jsonl.zst",
+    "health": "health.json"
+  },
+  "runtime": {
+    "agentsight_version": "0.2.66",
+    "kernel_release": "5.15.146.1-microsoft-standard-WSL2",
+    "architecture": "x86_64",
+    "collector_pid": 61341
+  }
+}

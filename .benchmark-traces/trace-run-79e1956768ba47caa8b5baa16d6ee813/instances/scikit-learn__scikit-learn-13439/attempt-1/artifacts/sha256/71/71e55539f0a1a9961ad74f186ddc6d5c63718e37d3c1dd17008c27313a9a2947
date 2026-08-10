@@ -1,0 +1,1 @@
+The patch tool inserted literal `\n` characters. I need to fix this. Let me rewrite the affected section properly:

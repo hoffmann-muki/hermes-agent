@@ -1,0 +1,1 @@
+{"command":"cd /testbed && sed -n '530,560p' sklearn/tests/test_pipeline.py","mode":"foreground"}

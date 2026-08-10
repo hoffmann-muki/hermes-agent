@@ -1,0 +1,173 @@
+Let me trace through the issue with a debugging script instead.
+
+I've identified the root cause of the issue. The problem lies in the `_separable` function in `/testbed/astropy/modeling/separable.py`. 
+
+When `transform._calculate_separability_matrix()` returns `NotImplemented` (the default for simple models), the code falls through to check `isinstance(transform, CompoundModel)`. For a CompoundModel, it recursively computes `_separable(transform.left)` and `_separable(transform.right)`.
+
+The key issue is in how the `&` operator's coord matrices are combined. When the inner compound model `cm = m.Linear1D(10) & m.Linear1D(5)` is processed, its separability matrix is correctly computed as a 2x2 diagonal. But when this inner matrix (an ndarray) is combined with the outer Pix2Sky_TAN model's coord matrix in `_cstack`, the `_coord_matrix` function is called with `noutp` (the total number of outputs of the *outer* compound model = 4), not the inner model's outputs.
+
+Let me trace through the `_cstack` function for `m.Pix2Sky_TAN() & cm`:
+- `left` = Pix2Sky_TAN (Model), `right` = cm (Model, a CompoundModel)
+- `noutp = _compute_n_outputs(left, right)` = 2 + 2 = 4
+- For left (Pix2Sky_TAN): `cleft = _coord_matrix(left, 'left', 4)` - this creates a 4x2 matrix with the 2x2 block in the top-left
+- For right (cm): `cright = _coord_matrix(right, 'right', 4)` - but `right` is a CompoundModel and `cm.separable` is True, so this creates a 4x2 matrix. The bug is in this branch - it does `mat[i, i] = 1` for `i` in range(n_inputs=2), producing a 4x2 matrix with ones at (0,0) and (1,1), then rolls it. This is incorrect for a separable compound model.
+
+The fundamental issue is that `_coord_matrix` doesn't properly handle the case where the model is itself a separable CompoundModel whose full separability matrix should be used. When `right` is a CompoundModel that is separable, `_coord_matrix` treats it as a simple separable model with independent inputs/outputs, creating a diagonal pattern, rather than using the actual computed separability matrix of the nested compound model.
+
+The fix should be in `_cstack`: when the right (or left) is a Model that is itself separable but is a CompoundModel, we should use its already-computed separability matrix instead of recomputing it via `_coord_matrix`. Actually, the cleaner fix is to modify `_separable` so that when a CompoundModel's `_calculate_separability_matrix` returns `NotImplemented`, it properly handles the recursion. But actually the issue is more subtle.
+
+Let me think about this more carefully. The `_separable` function computes the full separability matrix for the entire compound model tree. The issue is that `_cstack` and `_coord_matrix` are designed to work at each level of the tree, building up the matrix incrementally. The `_coord_matrix` function assumes that a "separable" model has a simple diagonal relationship between its inputs and outputs. But for a nested CompoundModel like `cm`, the relationship is more complex.
+
+The real fix: In `_cstack`, when left or right is a CompoundModel, we should recursively call `_separable` on it to get its full separability matrix, then properly embed that matrix. Currently, `_cstack` calls `_coord_matrix` for each side, which doesn't handle nested CompoundModels correctly.
+
+Let me verify my understanding by examining how `_separable` is called and what the recursion produces.
+
+For `m.Pix2Sky_TAN() & cm`:
+- `_separable(Pix2Sky_TAN & cm)` 
+- Pix2Sky_TAN has `_calculate_separability_matrix` returning NotImplemented (default)
+- It's a CompoundModel with op '&', so: `sepleft = _separable(Pix2Sky_TAN)`, `sepright = _separable(cm)`
+- `sepleft = _separable(Pix2Sky_TAN)` → Pix2Sky_TAN is a Model (not CompoundModel), returns `_coord_matrix(Pix2Sky_TAN, 'left', 2)` = 2x2 identity (since Pix2Sky_TAN.separable is False, so it's all ones in top-left 2x2)
+  
+Wait, Pix2Sky_TAN is a Projection model. Let me check its separable property. Projection models have `separable == False` because they mix coordinates. So `_coord_matrix` for Pix2Sky_TAN with pos='left', noutp=2 creates a 2x2 matrix of all ones. That's correct - both outputs depend on both inputs.
+
+- `sepright = _separable(cm)` where cm = Linear1D(10) & Linear1D(5)
+  - cm is a CompoundModel with op '&'
+  - `sepleft = _separable(Linear1D(10))` → `_coord_matrix(Linear1D(10), 'left', 1)` = [[1]] (1x1, separable)
+  - `sepright = _separable(Linear1D(5))` → `_coord_matrix(Linear1D(5), 'left', 1)` = [[1]]... wait, but pos should be 'right' for the right side.
+  
+Hmm, let me re-read `_separable`:
+```python
+sepleft = _separable(transform.left)
+sepright = _separable(transform.right)
+return _operators[transform.op](sepleft, sepright)
+```
+
+And `_separable` for a simple Model returns `_coord_matrix(transform, 'left', transform.n_outputs)`. So both left and right children get `pos='left'`! That seems like a potential issue, but for simple models with pos='left', the matrix is placed in the top-left, which is correct for the left child. For the right child, pos='left' would be wrong...
+
+Actually wait. Let me re-read `_coord_matrix`:
+- For a separable model (not Mapping, separable=True): creates `mat = zeros((noutp, model.n_inputs))`, then `mat[i, i] = 1` for i in range(n_inputs), then if pos=='right', rolls. If pos=='left', no roll.
+
+So for the right child Linear1D(5) with `_coord_matrix(Linear1D(5), 'left', 1)`:
+- noutp = 1 (cm.n_outputs when computing sepright... wait no)
+
+Actually, when computing `sepright = _separable(transform.right)` for `cm = Linear1D(10) & Linear1D(5)`:
+- transform.right = Linear1D(5)
+- `_separable(Linear1D(5))` → Linear1D(5) is a Model, not CompoundModel
+- `_calculate_separability_matrix()` returns NotImplemented
+- Returns `_coord_matrix(Linear1D(5), 'left', Linear1D(5).n_outputs)` = `_coord_matrix(Linear1D(5), 'left', 1)`
+- Linear1D(5).separable is True
+- mat = zeros((1, 1)), mat[0,0] = 1 → [[1]]
+- pos='left', no roll → [[1]]
+
+So sepright = [[1]]. Then `_cstack([[1]], [[1]])`:
+- noutp = _compute_n_outputs([[1]], [[1]]) = 1 + 1 = 2
+- left is not a Model, it's an ndarray: cleft = zeros((2, 1)), cleft[:1, :1] = 1 → [[1],[0]]
+- right is not a Model: cright = zeros((2, 1)), cright[-1:, -1:] = 1 → [[0],[1]]
+- hstack → [[1, 0], [0, 1]]
+
+So `_separable(cm)` = [[1,0],[0,1]] which is correct.
+
+Now back to `m.Pix2Sky_TAN() & cm`:
+- `_separable(Pix2Sky_TAN & cm)`
+- It's a CompoundModel with op '&'
+- sepleft = _separable(Pix2Sky_TAN)
+  - Pix2Sky_TAN is a Model
+  - Pix2Sky_TAN._calculate_separability_matrix() returns NotImplemented? Let me check...
+
+Actually, I need to check what Pix2Sky_TAN's separable property is and whether it overrides `_calculate_separability_matrix`. Let me look at the projection models.
+
+Actually, the key question is: does Pix2Sky_TAN.separable return False? If so, `_coord_matrix(Pix2Sky_TAN, 'left', 2)` would create:
+- mat = zeros((2, 2)), then since not separable: mat[:2, :2] = 1 → [[1,1],[1,1]]
+
+So sepleft = [[1,1],[1,1]].
+
+- sepright = _separable(cm) = [[1,0],[0,1]]
+- `_cstack([[1,1],[1,1]], [[1,0],[0,1]])`:
+  - noutp = _compute_n_outputs(2x2 array, 2x2 array) = 2 + 2 = 4
+  - left is ndarray (2x2): cleft = zeros((4, 2)), cleft[:2, :2] = [[1,1],[1,1]] → [[1,1],[1,1],[0,0],[0,0]]
+  - right is ndarray (2x2): cright = zeros((4, 2)), cright[-2:, -2:] = 1 → [[0,0],[0,0],[1,1],[1,1]]
+  - hstack → [[1,1,0,0],[1,1,0,0],[0,0,1,1],[0,0,1,1]]
+
+That gives [[True,True,False,False],[True,True,False,False],[False,False,True,True],[False,False,True,True]] which matches the buggy output!
+
+So the bug is clear now. When `_cstack` processes the right child which is a CompoundModel (cm), it's NOT calling `_coord_matrix` on it directly - instead, `_separable` is called recursively which produces the correct 2x2 diagonal. But then `_cstack` treats this 2x2 diagonal result as an ndarray and embeds it incorrectly.
+
+Wait, I traced through and got the correct matrix from `_separable(cm)`. But then `_cstack` embeds it as if all outputs depend on all inputs (using `cright[-right.shape[0]:, -right.shape[1]:] = 1` instead of copying the actual values).
+
+That's the bug! In `_cstack`, when `right` is an ndarray (the result of `_separable` on a CompoundModel), the code does:
+```python
+cright = np.zeros((noutp, right.shape[1]))
+cright[-right.shape[0]:, -right.shape[1]:] = 1
+```
+
+This sets ALL elements in the bottom-right block to 1, instead of copying the actual values from `right`. Similarly for `left`:
+```python
+cleft = np.zeros((noutp, left.shape[1]))
+cleft[: left.shape[0], : left.shape[1]] = left
+```
+
+The left side correctly copies `left`, but the right side sets everything to 1 instead of copying `right`.
+
+So the fix is to change `cright[-right.shape[0]:, -right.shape[1]:] = 1` to `cright[-right.shape[0]:, -right.shape[1]:] = right`.
+
+Let me verify: with the fix, for the right child:
+- cright = zeros((4, 2)), cright[-2:, -2:] = [[1,0],[0,1]] → [[0,0],[0,0],[1,0],[0,1]]
+- hstack with cleft = [[1,1,0,0],[1,1,0,0],[0,0,0,0],[0,0,0,0]]
+- Result: [[1,1,0,0],[1,1,0,0],[0,0,1,0],[0,0,0,1]]
+
+That's the correct answer! The matrix would be diagonal for the Linear1D parts.
+
+Now let me also check the left side. The left side `cleft[: left.shape[0], : left.shape[1]] = left` correctly copies the values. But wait, what if left is the result of `_separable` on a CompoundModel? Then it would have the correct values and they'd be copied. Good.
+
+But actually, let me reconsider. The left side uses `left.shape[1]` as the number of columns for cleft. And right uses `right.shape[1]`. This works because both left and right coord matrices have their respective number of inputs as columns.
+
+Let me also think about whether the left side could have an issue. For `cm & m.Pix2Sky_TAN()`:
+- sepleft = _separable(cm) = [[1,0],[0,1]]
+- sepright = _separable(Pix2Sky_TAN) = [[1,1],[1,1]] (since not separable)
+- _cstack([[1,0],[0,1]], [[1,1],[1,1]]):
+  - noutp = 2 + 2 = 4
+  - cleft = zeros((4, 2)), cleft[:2, :2] = [[1,0],[0,1]] → [[1,0],[0,1],[0,0],[0,0]]
+  - cright = zeros((4, 2)), with fix: cright[-2:, -2:] = [[1,1],[1,1]] → [[0,0],[0,0],[1,1],[1,1]]
+  - hstack → [[1,0,0,0],[0,1,0,0],[0,0,1,1],[0,0,1,1]]
+
+That's correct - the cm outputs are diagonal (separable), and Pix2Sky_TAN outputs are fully connected.
+
+Now, I'm confident the fix is to change line 245 in `_cstack`:
+```python
+cright[-right.shape[0]:, -right.shape[1]:] = 1
+```
+to:
+```python
+cright[-right.shape[0]:, -right.shape[1]:] = right
+```
+
+Let me look at the exact lines again to make the edit.</think>Now I understand the code flow. Let me trace through the bug with a debug script to confirm my understanding.<tool_call>terminal<arg_key>command</arg_key><arg_value>cd /testbed && python -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import _separable, _cstack
+
+# Let's trace what _separable produces for the nested compound model
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('_separable(cm):')
+print(_separable(cm))
+print()
+
+# Pix2Sky_TAN separability
+print('_separable(Pix2Sky_TAN):')
+print(_separable(m.Pix2Sky_TAN()))
+print()
+
+# Full nested model
+nested = m.Pix2Sky_TAN() & cm
+print('nested.left:', nested.left)
+print('nested.right:', nested.right)
+print()
+print('_separable(nested.left):')
+print(_separable(nested.left))
+print()
+print('_separable(nested.right):')
+print(_separable(nested.right))
+print()
+print('_cstack result:')
+print(_cstack(_separable(nested.left), _separable(nested.right)))
+"
+</arg_value></tool_call>

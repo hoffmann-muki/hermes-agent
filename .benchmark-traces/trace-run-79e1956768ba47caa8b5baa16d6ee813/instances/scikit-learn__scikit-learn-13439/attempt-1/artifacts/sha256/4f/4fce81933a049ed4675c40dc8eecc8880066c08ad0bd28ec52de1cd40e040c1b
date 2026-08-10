@@ -1,0 +1,1 @@
+I see - the patch tool inserted literal `\n` characters. I need to fix this. Let me use the `patch` tool with the `patch` mode to fix the broken section. First, let me see the exact broken content:

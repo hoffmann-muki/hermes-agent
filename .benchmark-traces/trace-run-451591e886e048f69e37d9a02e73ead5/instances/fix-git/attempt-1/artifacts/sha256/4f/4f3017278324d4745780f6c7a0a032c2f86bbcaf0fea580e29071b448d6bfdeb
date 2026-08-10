@@ -1,0 +1,22 @@
+All done! Here's a summary of what happened and what I did:
+
+## What happened
+Your changes were committed as `c499730` ("Move to Stanford") but were **orphaned** — not on any branch. When you checked out `master`, that commit disappeared from the visible history. The `git reflog` revealed it was still in git's object database, just unreachable.
+
+## What I recovered
+Your commit updated two files:
+- **`_includes/about.md`** — Changed your bio from "PhD candidate at UW CSE" to "Postdoctoral Researcher at Stanford CS"
+- **`_layouts/default.html`** — Updated your title from "PhD Student @ UW CSE" to "Postdoc @ Stanford", reformatted the Google Fonts `<link>` tag, and cleaned up whitespace in the publications section
+
+## What I did
+1. **Found the orphaned commit** via `git reflog`
+2. **Merged it into master** with `git merge c499730`
+3. **Resolved a conflict** in `_includes/about.md` (both versions had changed the same line — I kept your updated Stanford version)
+4. **Committed the merge** as `e6938db`
+
+## Current state
+- ✅ On `master`, working tree clean
+- ✅ Your "Move to Stanford" changes are now in master history
+- ✅ The merge is recorded as a proper merge commit preserving the original commit
+
+Your changes are now safely in master and won't disappear again.

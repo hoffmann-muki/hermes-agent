@@ -1,0 +1,8 @@
+All done! Here's a summary of what happened and what I did:
+
+## What happened
+Your changes were committed as `c499730` ("Move to Stanford") but were **orphaned** — not on any branch. When you checked out `master`, that commit disappeared from the visible history. The `git reflog` revealed it was still in git's object database, just unreachable.
+
+## What I recovered
+Your commit updated two files:
+- **`_includes/about.md`** — Changed your bio from "PhD candidate at UW CSE" to "Postdoctoral Researc

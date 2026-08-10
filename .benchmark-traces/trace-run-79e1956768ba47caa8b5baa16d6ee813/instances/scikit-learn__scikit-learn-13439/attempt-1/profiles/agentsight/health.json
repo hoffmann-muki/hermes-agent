@@ -1,0 +1,65 @@
+{
+  "complete": true,
+  "containerTls": {
+    "active": false,
+    "requested": false
+  },
+  "hostTls": {
+    "active": true,
+    "binaryPath": "/home/hoffmann_muki/.local/share/uv/python/cpython-3.13.14-linux-x86_64-gnu/bin/python3.13",
+    "requested": true
+  },
+  "profileId": "trace-f4495e64d312470eb1e0fda5c049060c",
+  "schema": "benchmark-agentsight-health/v1",
+  "sources": {
+    "host": {
+      "complete": true,
+      "ended_at_ms": 1786335317861,
+      "error": null,
+      "evidence": {
+        "diagnostics_by_type": {},
+        "events_by_source": {
+          "diagnostic": 1,
+          "http_parser": 52,
+          "sse_processor": 24,
+          "ssl": 171,
+          "system": 67
+        },
+        "events_written": 315,
+        "first_capture_timestamp_ms": 1786335185780,
+        "last_capture_timestamp_ms": 1786335317818,
+        "write_errors": 0
+      },
+      "profile_id": "trace-f4495e64d312470eb1e0fda5c049060c",
+      "ready_at_ms": 1786335185779,
+      "schema": "agentsight-capture-health/v1",
+      "scope_id": "host",
+      "started_at_ms": 1786335182938,
+      "status": "completed"
+    },
+    "task-container": {
+      "complete": true,
+      "ended_at_ms": 1786335317958,
+      "error": null,
+      "evidence": {
+        "diagnostics_by_type": {},
+        "events_by_source": {
+          "diagnostic": 1,
+          "process": 3251,
+          "system": 66
+        },
+        "events_written": 3318,
+        "first_capture_timestamp_ms": 1786335187189,
+        "last_capture_timestamp_ms": 1786335317213,
+        "write_errors": 0
+      },
+      "profile_id": "trace-f4495e64d312470eb1e0fda5c049060c",
+      "ready_at_ms": 1786335187188,
+      "schema": "agentsight-capture-health/v1",
+      "scope_id": "task-container",
+      "started_at_ms": 1786335186628,
+      "status": "completed"
+    }
+  },
+  "status": "completed"
+}

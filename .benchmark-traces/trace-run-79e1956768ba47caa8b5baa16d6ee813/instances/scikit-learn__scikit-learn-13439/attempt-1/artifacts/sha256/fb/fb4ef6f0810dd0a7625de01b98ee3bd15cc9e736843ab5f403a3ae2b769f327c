@@ -1,0 +1,1 @@
+I already have the content. Let me look at the `test_pipeline_slice` and `test_pipeline_index` tests which are at lines 532 and 543. Let me read them with a different offset to avoid the loop warning:

@@ -1,0 +1,1 @@
+Found it. Your commit `c499730` ("Move to Stanford") is orphaned — it's not on any branch, so when you checked out master, it disappeared from the visible history. Let me look at the actual changes and then merge them into master.

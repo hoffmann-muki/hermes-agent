@@ -1,0 +1,1 @@
+I can see the issue. The reflog shows your changes were committed as `c499730` ("Move to Stanford") on a branch that's now orphaned — not reachable from master. Let me examine that commit and recover your changes.

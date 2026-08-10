@@ -1,0 +1,1 @@
+I've reproduced the issue. Let me look at the `_calculate_separability_matrix` method in core.py.

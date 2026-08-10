@@ -1,0 +1,43 @@
+{
+  "schema": "agentsight-profile/v1",
+  "profile_id": "trace-f4495e64d312470eb1e0fda5c049060c",
+  "scope_id": "task-container",
+  "capture_level": "research",
+  "status": "completed",
+  "started_at_ms": 1786335186628,
+  "ready_at_ms": 1786335187188,
+  "ended_at_ms": 1786335317958,
+  "target": {
+    "pid": null,
+    "session_id": null,
+    "comm": null,
+    "cgroup": null,
+    "pid_namespace": "/proc/57569/ns/pid",
+    "binary_path": null,
+    "tls_binary_only": false
+  },
+  "sources": {
+    "tls": false,
+    "process": true,
+    "stdio": false,
+    "system": true,
+    "filesystem": true,
+    "network": true,
+    "signals": true,
+    "memory": true,
+    "copy_on_write": false,
+    "stdio_max_bytes": 65536,
+    "system_interval_seconds": 2
+  },
+  "artifacts": {
+    "database": "capture.db",
+    "evidence_journal": "system-events.jsonl.zst",
+    "health": "health.json"
+  },
+  "runtime": {
+    "agentsight_version": "0.2.66",
+    "kernel_release": "5.15.146.1-microsoft-standard-WSL2",
+    "architecture": "x86_64",
+    "collector_pid": 57668
+  }
+}

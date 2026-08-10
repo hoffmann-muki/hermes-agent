@@ -1,0 +1,11 @@
+Trace Monitoring
+============================================================
+============================================================
+Starting flexible trace monitoring with 3 runners and 2 global analyzers...
+Press Ctrl+C to stop
+
+
+Received shutdown signal, shutting down...
+[HTTPFilter Global Metrics] No metrics available
+[SSLFilter Global Metrics] No metrics available
+✓ Shutdown requested. Stopping monitoring.

@@ -1,0 +1,1 @@
+Now I understand the issue. The `Pipeline` class has `__getitem__` but no `__len__` method, so `len(pipe)` raises a `TypeError`. Let me add a `__len__` method right after `__getitem__`.

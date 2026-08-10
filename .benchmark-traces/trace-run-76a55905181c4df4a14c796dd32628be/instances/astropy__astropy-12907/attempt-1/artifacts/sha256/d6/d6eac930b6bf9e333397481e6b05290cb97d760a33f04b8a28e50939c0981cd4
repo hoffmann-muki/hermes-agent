@@ -1,0 +1,1 @@
+{"output": "cm:\n[[ True False]\n [False  True]]\n\nPix2Sky_TAN & Linear1D & Linear1D:\n[[ True  True False False]\n [ True  True False False]\n [False False  True False]\n [False False False  True]]\n\nPix2Sky_TAN & cm:\n[[ True  True False False]\n [ True  True False False]\n [False False  True  True]\n [False False  True  True]]", "exit_code": 0, "error": null}

