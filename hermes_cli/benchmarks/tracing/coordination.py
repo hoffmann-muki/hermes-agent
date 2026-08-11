@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Literal, Protocol, Sequence
 from uuid import uuid4
 
-from hermes_cli.benchmarks.tracing.runtime import utc_now, write_run_index
+from hermes_cli.benchmarks.tracing.runtime import (
+    TraceRecorder,
+    utc_now,
+    write_run_index,
+)
 
 
 @dataclass(frozen=True)
@@ -144,6 +148,7 @@ def finalize_trace_run(run: TraceRun, harness: TraceHarnessAdapter) -> Path:
     if run.root.is_symlink() or not run.root.resolve().is_dir():
         raise ValueError("Trace run root must be a real directory")
     harness.prepare_finalization(run)
+    _recover_interrupted_attempts(run)
     observed: dict[str, set[int]] = {}
     for manifest_path in sorted(run.root.glob("instances/*/attempt-*/manifest.json")):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -193,3 +198,11 @@ def finalize_trace_run(run: TraceRun, harness: TraceHarnessAdapter) -> Path:
         instance_ids=selection.instance_ids,
         selection_strategy=selection.strategy,
     )
+
+
+def _recover_interrupted_attempts(run: TraceRun) -> None:
+    for preflight_path in sorted(run.root.glob("instances/*/attempt-*/preflight.json")):
+        attempt_dir = preflight_path.parent
+        if (attempt_dir / "manifest.json").is_file():
+            continue
+        TraceRecorder.recover_from_preflight(attempt_dir).finalize()

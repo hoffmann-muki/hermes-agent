@@ -41,6 +41,7 @@ from hermes_cli.benchmarks.tracing.runtime import (
     NATIVE_CHUNK_MEDIA_TYPE,
     SCHEMA_DIGEST,
     TraceIdentity,
+    TraceRecorder,
     _Redactor,
 )
 
@@ -160,6 +161,82 @@ def test_generic_coordinator_supports_an_arbitrary_benchmark(tmp_path):
     assert execution_tree["source"]["event_count"] == len(events)
     assert execution_tree["source"]["represented_event_count"] == len(events)
     assert manifest["files"]["execution_tree"] == "execution-tree.json"
+
+
+def test_generic_coordinator_recovers_a_killed_attempt(tmp_path):
+    run = create_trace_run(
+        tmp_path / "traces",
+        benchmark="custom-benchmark",
+        framework="hermes",
+    )
+    adapter = create_hermes_attempt_trace(
+        run=run,
+        instance_id="custom-instance",
+        attempt=1,
+        framework_revision=REVISION,
+        model=MODEL,
+        agent_timeout_seconds=30,
+        evaluation_workers=1,
+    )
+    adapter.start_session("custom-session")
+    recorder = cast(TraceRecorder, adapter._recorder)
+    assert recorder._events is not None
+    assert recorder._native is not None
+    recorder._events.close()
+    recorder._native.close()
+
+    path = finalize_trace_run(run, _CustomHarness())
+
+    attempt_dir = Path(
+        json.loads(path.read_text(encoding="utf-8"))["attempts"][0]["path"]
+    )
+    health = json.loads(
+        (run.root / attempt_dir / "health.json").read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (run.root / attempt_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert health["status"] == "degraded"
+    assert health["finalization"] == "recovered"
+    assert {issue["code"] for issue in health["issues"]} == {"trace.process_recovery"}
+    assert manifest["complete"] is False
+
+
+def test_recovery_discards_a_torn_final_journal_line(tmp_path):
+    run = create_trace_run(
+        tmp_path / "traces",
+        benchmark="custom-benchmark",
+        framework="hermes",
+    )
+    adapter = create_hermes_attempt_trace(
+        run=run,
+        instance_id="custom-instance",
+        attempt=1,
+        framework_revision=REVISION,
+        model=MODEL,
+        agent_timeout_seconds=30,
+        evaluation_workers=1,
+    )
+    adapter.start_session("custom-session")
+    recorder = cast(TraceRecorder, adapter._recorder)
+    assert recorder._events is not None
+    assert recorder._native is not None
+    recorder._events.close()
+    recorder._native.close()
+    with (recorder.attempt_dir / "journal.jsonl").open("ab") as stream:
+        stream.write(b'{"event_id":"torn"')
+
+    finalize_trace_run(run, _CustomHarness())
+
+    health = json.loads(
+        (recorder.attempt_dir / "health.json").read_text(encoding="utf-8")
+    )
+    assert health["finalization"] == "recovered"
+    assert health["counters"]["dropped_events"] == 1
+    assert {issue["code"] for issue in health["issues"]} == {
+        "journal.torn_final_line",
+        "trace.process_recovery",
+    }
 
 
 def test_error_level_trace_issue_marks_attempt_failed_and_partial(tmp_path):

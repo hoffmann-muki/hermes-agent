@@ -128,7 +128,9 @@ that span rather than as a second delegation.
 The trace also records Harbor's resolved task identity, effective agent timeout,
 and container image. Concurrent trials receive locked per-instance attempt
 ordinals, and `run.json` is written only after all requested instances and
-attempts finalize. Harbor's verifier lifecycle is outside the installed-agent
+attempts finalize. Timeout-killed recorders are finalized from their durable
+checkpoints as explicitly degraded, recovered traces before this coverage
+check. Harbor's verifier lifecycle is outside the installed-agent
 boundary and is reported as `not_exposed`; native Harbor results and ATIF data
 remain authoritative. Trace failures after the attempt begins cannot change the
 benchmark outcome or initiate a retry. Token usage and cost are deliberately

@@ -714,21 +714,7 @@ class TraceRecorder:
     """One durable attempt recorder with fail-open post-initialization writes."""
 
     def __init__(self, config: TraceConfig) -> None:
-        self._config = config
-        self._redactor = _Redactor()
-        self._created_at = utc_now()
-        self._event_sequence = 0
-        self._native_sequence = 0
-        self._event_ids: set[str] = set()
-        self._native_ids: set[str] = set()
-        self._artifacts: dict[str, JsonObject] = {}
-        self._issues: dict[str, JsonObject] = {}
-        self._redactions = 0
-        self._dropped_events = 0
-        self._lock = threading.RLock()
-        self._finalized: TraceFinalization | None = None
-        self._events: _Journal | None = None
-        self._native: _Journal | None = None
+        self._set_initial_state(config)
         try:
             self._prepare_config()
             _create_private_directory(config.attempt_dir)
@@ -749,6 +735,216 @@ class TraceRecorder:
             raise TraceInitializationError(
                 "Hermes benchmark tracing could not be initialized safely"
             ) from exc
+
+    @classmethod
+    def recover_from_preflight(cls, attempt_dir: Path) -> "TraceRecorder":
+        """Rehydrate an interrupted recorder from its durable checkpoint."""
+
+        candidate = attempt_dir.expanduser().absolute()
+        if candidate.is_symlink():
+            raise TraceInitializationError(
+                "Hermes trace recovery checkpoint is unavailable"
+            )
+        path = candidate.resolve()
+        preflight_path = path / "preflight.json"
+        if (
+            preflight_path.is_symlink()
+            or not preflight_path.is_file()
+            or (path / "manifest.json").exists()
+        ):
+            raise TraceInitializationError(
+                "Hermes trace recovery checkpoint is unavailable"
+            )
+        try:
+            document = json.loads(preflight_path.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                raise ValueError("Trace recovery checkpoint is not an object")
+            if document.get("format") != "benchmark-trace/preflight-v1":
+                raise ValueError("Trace recovery checkpoint format is unsupported")
+            identity = _recovery_object(document, "identity")
+            capabilities = _recovery_array(document, "capabilities")
+            config = TraceConfig(
+                attempt_dir=path,
+                identity=TraceIdentity(
+                    trace_id=_recovery_string(identity, "trace_id"),
+                    run_id=_recovery_string(identity, "run_id"),
+                    benchmark=_recovery_string(identity, "benchmark"),
+                    framework=_recovery_string(identity, "framework"),
+                    instance_id=_recovery_string(identity, "instance_id"),
+                    attempt=_recovery_integer(identity, "attempt"),
+                ),
+                producer=_recovery_object(document, "producer"),
+                provenance=_recovery_object(document, "provenance"),
+                execution=_recovery_object(document, "execution"),
+                capabilities=tuple(
+                    Capability(
+                        category=_recovery_string(item, "category"),
+                        state=_recovery_string(item, "state"),
+                        coverage=_recovery_string(item, "coverage"),
+                        timing=_recovery_string(item, "timing"),
+                        evidence=tuple(_recovery_strings(item, "evidence")),
+                        limitations=tuple(_recovery_strings(item, "limitations")),
+                    )
+                    for item in capabilities
+                    if isinstance(item, dict)
+                ),
+            )
+            if len(config.capabilities) != len(capabilities):
+                raise ValueError("Trace recovery capabilities are malformed")
+            events, torn_events, event_content = _read_recovery_jsonl(
+                path / "journal.jsonl"
+            )
+            native, torn_native, native_content = _read_recovery_jsonl(
+                path / "native" / "index.jsonl"
+            )
+            recorder = cls.__new__(cls)
+            recorder._set_initial_state(config)
+            recorder._created_at = _recovery_string(document, "created_at")
+            recorder._prepare_config()
+            recorder._load_recovered_events(events)
+            recorder._load_recovered_native(native)
+            if torn_events:
+                _atomic_write(path / "journal.jsonl", event_content)
+            if torn_native:
+                _atomic_write(path / "native" / "index.jsonl", native_content)
+            recorder._recovery_mode = True
+            if torn_events:
+                recorder._dropped_events += 1
+                recorder.report_issue(
+                    "journal.torn_final_line",
+                    "A torn final event journal line was discarded",
+                    severity="warning",
+                )
+            if torn_native:
+                recorder.report_issue(
+                    "native.torn_final_line",
+                    "A torn final native journal line was discarded",
+                    severity="warning",
+                )
+            recorder.report_issue(
+                "trace.process_recovery",
+                "Trace finalization resumed from durable journals",
+                severity="warning",
+            )
+        except (
+            OSError,
+            TypeError,
+            ValueError,
+            TraceStorageError,
+        ) as exc:
+            raise TraceInitializationError(
+                "Hermes trace recovery checkpoint is invalid"
+            ) from exc
+        return recorder
+
+    def _set_initial_state(self, config: TraceConfig) -> None:
+        self._config = config
+        self._redactor = _Redactor()
+        self._created_at = utc_now()
+        self._event_sequence = 0
+        self._native_sequence = 0
+        self._event_ids: set[str] = set()
+        self._native_ids: set[str] = set()
+        self._artifacts: dict[str, JsonObject] = {}
+        self._issues: dict[str, JsonObject] = {}
+        self._redactions = 0
+        self._dropped_events = 0
+        self._lock = threading.RLock()
+        self._finalized: TraceFinalization | None = None
+        self._events: _Journal | None = None
+        self._native: _Journal | None = None
+        self._recovery_mode = False
+
+    def _load_recovered_events(self, events: tuple[JsonObject, ...]) -> None:
+        for expected, event in enumerate(events, start=1):
+            event_id = event.get("event_id")
+            artifacts = event.get("artifacts")
+            if (
+                event.get("schema_version") != SCHEMA_VERSION
+                or event.get("schema_digest") != SCHEMA_DIGEST
+                or event.get("sequence") != expected
+                or any(
+                    event.get(key) != value
+                    for key, value in self.identity.event_fields().items()
+                )
+                or not isinstance(event_id, str)
+                or event_id in self._event_ids
+                or not isinstance(artifacts, list)
+                or not _valid_event_contract_fields(
+                    event_type=event.get("event_type"),
+                    event_family=event.get("event_family"),
+                    phase=event.get("phase"),
+                    status=event.get("status"),
+                    event_id=event_id,
+                    span_id=event.get("span_id"),
+                    occurred_at=event.get("occurred_at"),
+                    origin=event.get("origin"),
+                    timing=event.get("timing"),
+                    error=event.get("error"),
+                    relations=event.get("relations", ()),
+                    identifiers=tuple(
+                        event.get(key)
+                        for key in (
+                            "session_id",
+                            "agent_id",
+                            "parent_agent_id",
+                            "turn_id",
+                            "parent_span_id",
+                        )
+                    ),
+                )
+            ):
+                raise TraceStorageError("Recovered event journal is malformed")
+            for reference in artifacts:
+                self._load_recovered_artifact(reference)
+            error = event.get("error")
+            if isinstance(error, dict) and "artifact" in error:
+                self._load_recovered_artifact(error["artifact"])
+            self._event_ids.add(event_id)
+        self._event_sequence = len(events)
+
+    def _load_recovered_native(self, records: tuple[JsonObject, ...]) -> None:
+        for expected, record in enumerate(records, start=1):
+            _require_native_journal_record(record)
+            native_id = record["native_record_id"]
+            if (
+                record.get("sequence") != expected
+                or record.get("trace_id") != self.identity.trace_id
+                or record.get("framework") != self.identity.framework
+                or native_id in self._native_ids
+            ):
+                raise TraceStorageError("Recovered native journal is malformed")
+            self._native_ids.add(native_id)
+        self._native_sequence = len(records)
+
+    def _load_recovered_artifact(self, value: object) -> None:
+        if not isinstance(value, dict):
+            raise TraceStorageError("Recovered artifact reference is malformed")
+        path_value = value.get("path")
+        digest = value.get("sha256")
+        size = value.get("size_bytes")
+        if (
+            not isinstance(path_value, str)
+            or not re.fullmatch(
+                r"artifacts/sha256/[0-9a-f]{2}/[0-9a-f]{64}", path_value
+            )
+            or not isinstance(digest, str)
+            or path_value.rsplit("/", 1)[-1] != digest
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
+        ):
+            raise TraceStorageError("Recovered artifact reference is malformed")
+        path = self.attempt_dir / path_value
+        if path.is_symlink() or not path.is_file():
+            raise TraceStorageError("Recovered artifact is unavailable")
+        content = path.read_bytes()
+        if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
+            raise TraceStorageError("Recovered artifact content is corrupt")
+        existing = self._artifacts.get(path_value)
+        if existing is not None and existing != value:
+            raise TraceStorageError("Recovered artifact metadata is inconsistent")
+        self._artifacts[path_value] = dict(value)
 
     @property
     def identity(self) -> TraceIdentity:
@@ -1209,10 +1405,11 @@ class TraceRecorder:
             if self._finalized is not None:
                 return self._finalized
             try:
-                if self._events is None or self._native is None:
-                    raise TraceStorageError("Trace journals are unavailable")
-                self._events.close()
-                self._native.close()
+                if not self._recovery_mode:
+                    if self._events is None or self._native is None:
+                        raise TraceStorageError("Trace journals are unavailable")
+                    self._events.close()
+                    self._native.close()
                 journal = self.attempt_dir / "journal.jsonl"
                 content = journal.read_bytes()
                 if content and not content.endswith(b"\n"):
@@ -1246,6 +1443,14 @@ class TraceRecorder:
                     issue.get("severity") == "error" for issue in self._issues.values()
                 )
                 healthy = not self._issues and self._dropped_events == 0
+                recovery_issues = {
+                    "journal.torn_final_line",
+                    "native.torn_final_line",
+                    "trace.process_recovery",
+                }
+                recovered = self._recovery_mode and not any(
+                    code not in recovery_issues for code in self._issues
+                )
                 capabilities = {
                     "schema_version": SCHEMA_VERSION,
                     "schema_digest": SCHEMA_DIGEST,
@@ -1262,7 +1467,9 @@ class TraceRecorder:
                     "status": (
                         "healthy" if healthy else "failed" if failed else "degraded"
                     ),
-                    "finalization": "clean" if healthy else "partial",
+                    "finalization": (
+                        "clean" if healthy else "recovered" if recovered else "partial"
+                    ),
                     "failure_policy": "continue_agent_without_retry",
                     "agent_outcome_affected": False,
                     "benchmark_retry_triggered": False,
@@ -1503,6 +1710,61 @@ def _native_redaction(member: JsonObject) -> JsonObject:
     ):
         raise TraceStorageError("Native redaction metadata is malformed")
     return redaction
+
+
+def _read_recovery_jsonl(
+    path: Path,
+) -> tuple[tuple[JsonObject, ...], bool, bytes]:
+    if path.is_symlink() or not path.is_file():
+        raise TraceStorageError("Trace recovery journal is unavailable")
+    content = path.read_bytes()
+    torn = bool(content and not content.endswith(b"\n"))
+    complete = content[: content.rfind(b"\n") + 1] if torn else content
+    records: list[JsonObject] = []
+    for line in complete.splitlines():
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TraceStorageError("Trace recovery journal is malformed") from exc
+        if not isinstance(record, dict):
+            raise TraceStorageError("Trace recovery journal record is not an object")
+        records.append(record)
+    return tuple(records), torn, complete
+
+
+def _recovery_object(document: Mapping[str, object], key: str) -> JsonObject:
+    value = document.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"Trace recovery field {key!r} is not an object")
+    return dict(value)
+
+
+def _recovery_array(document: Mapping[str, object], key: str) -> list[object]:
+    value = document.get(key)
+    if not isinstance(value, list):
+        raise ValueError(f"Trace recovery field {key!r} is not an array")
+    return value
+
+
+def _recovery_string(document: Mapping[str, object], key: str) -> str:
+    value = document.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Trace recovery field {key!r} is not a string")
+    return value
+
+
+def _recovery_integer(document: Mapping[str, object], key: str) -> int:
+    value = document.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Trace recovery field {key!r} is not an integer")
+    return value
+
+
+def _recovery_strings(document: Mapping[str, object], key: str) -> list[str]:
+    value = document.get(key)
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"Trace recovery field {key!r} is not a string array")
+    return value
 
 
 def encode_instance_id(instance_id: str) -> str:

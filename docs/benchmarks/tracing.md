@@ -61,6 +61,13 @@ per-record artifacts are outside the shared trace contract.
 On filesystems with hard-link support, finalized `journal.jsonl` and
 `events.jsonl` also share one inode, with an atomic-copy fallback.
 
+If a timeout or process termination kills an attempt after its durable
+checkpoint is written but before finalization, run coordination recovers the
+complete journal records before checking coverage. A torn final JSONL record is
+discarded, the attempt is explicitly marked `degraded` with `recovered`
+finalization, and `run.json` can still account for the attempt. Recovery never
+invents missing agent actions or closing events.
+
 ## AgentSight companion profiles
 
 Every traced SWE-bench Verified, SWE-bench Pro, and Terminal-Bench 2.1 attempt
