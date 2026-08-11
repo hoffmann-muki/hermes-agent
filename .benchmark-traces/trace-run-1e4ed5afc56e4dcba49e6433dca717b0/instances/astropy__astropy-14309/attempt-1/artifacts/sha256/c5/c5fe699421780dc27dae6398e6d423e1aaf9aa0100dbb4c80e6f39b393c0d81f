@@ -1,0 +1,1 @@
+{"command":"cd /testbed && python -c \"\nfrom astropy.io.registry import identify_format\nfrom astropy.table import Table\ntry:\n    result = identify_format('write', Table, 'bububu.ecsv', None, [], {})\n    print('Result:', result)\nexcept IndexError as e:\n    print('IndexError:', e)\n\""}

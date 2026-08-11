@@ -1,0 +1,1 @@
+I found the secret=<redacted:assignment> The data at address `0x404060` is XOR-encoded with `0x42`, and decoding it reveals the flag. Let me write it to the results file.

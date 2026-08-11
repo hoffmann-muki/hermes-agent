@@ -1,0 +1,1 @@
+{"command":"which objdump gdb radare2 r2 2>/dev/null; ls /usr/bin/ | grep -i \"obj\\|gdb\\|rad\\|r2\\|disas\" 2>/dev/null"}

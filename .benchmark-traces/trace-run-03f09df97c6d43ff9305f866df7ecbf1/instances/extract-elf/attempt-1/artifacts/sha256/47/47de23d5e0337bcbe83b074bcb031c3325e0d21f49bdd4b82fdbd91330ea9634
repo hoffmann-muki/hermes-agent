@@ -1,0 +1,1 @@
+{"output": "/app/a.out:     file format elf64-x86-64\n\nContents of section .data:\n 4000 00000000 00000000 08400000 00000000  .........@......", "exit_code": 0, "error": null}

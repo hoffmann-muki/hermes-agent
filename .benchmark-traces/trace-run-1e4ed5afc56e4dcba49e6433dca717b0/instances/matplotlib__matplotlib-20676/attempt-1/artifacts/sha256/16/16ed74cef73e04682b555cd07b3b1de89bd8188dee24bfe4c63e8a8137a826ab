@@ -1,0 +1,1 @@
+{"command":"cd /testbed && python -c \"\nimport matplotlib\nmatplotlib.use('Agg')\nfrom matplotlib import pyplot as plt\n\nfig, ax = plt.subplots()\nax.plot([10, 20], [10, 20])\nprint('before:', ax.get_xlim())\nax.axvline(10)\nprint('after axvline:', ax.get_xlim())\n\"","workdir":"/testbed"}

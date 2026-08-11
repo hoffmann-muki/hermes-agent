@@ -1,0 +1,6 @@
+{
+  "schema": "agentsight-capture-ready/v1",
+  "profile_id": "trace-7c2b563a32db450ebc0fd390f57a64f3",
+  "scope_id": "host",
+  "ready_at_ms": 1786407709146
+}

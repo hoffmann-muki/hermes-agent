@@ -1,0 +1,12 @@
+The secret key has been successfully extracted and saved to `/app/results.txt`.
+
+## Summary
+
+**Analysis of the program:**
+
+1. **Initial exploration**: The binary `/app/vulnerable` is an ELF64 executable. Running it normally just prints "Input processed successfully."
+
+2. **String analysis**: `strings` revealed key strings including:
+   - "Debugging detected! Access denied." — indicating anti-debugging via `ptrace`
+   - "Access granted! Secret: %s" — the format string for the secret
+   - "Authent

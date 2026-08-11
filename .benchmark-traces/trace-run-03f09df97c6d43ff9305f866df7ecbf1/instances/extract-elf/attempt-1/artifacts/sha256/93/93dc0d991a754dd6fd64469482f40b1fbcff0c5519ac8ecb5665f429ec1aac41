@@ -1,0 +1,1 @@
+{"command":"objdump -s -j .dynamic /app/a.out"}

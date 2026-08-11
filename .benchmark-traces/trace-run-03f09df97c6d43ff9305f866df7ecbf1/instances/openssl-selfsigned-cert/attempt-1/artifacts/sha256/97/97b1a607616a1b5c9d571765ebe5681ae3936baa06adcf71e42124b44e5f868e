@@ -1,0 +1,14 @@
+The key and certificate moduli match, confirming they are a valid pair. Everything is complete. Here's a summary of what was accomplished:
+
+## Summary
+
+### Files Created
+
+1. **`/app/ssl/server.key`** — 2048-bit RSA private key with permissions `600` (owner read/write only)
+
+2. **`/app/ssl/server.crt`** — Self-signed certificate valid for 365 days with:
+   - Organization Name: "DevOps Team"
+   - Common Name: "dev-internal.company.local"
+   - Validity: Aug 11, 2026 → Aug 11, 2027
+
+3. **`/app/ssl/s

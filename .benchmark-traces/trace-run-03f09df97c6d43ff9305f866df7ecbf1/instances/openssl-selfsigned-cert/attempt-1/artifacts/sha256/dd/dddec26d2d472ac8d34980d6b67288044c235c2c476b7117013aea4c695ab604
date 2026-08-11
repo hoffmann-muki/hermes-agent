@@ -1,0 +1,1 @@
+{"command":"echo \"=== Key Modulus ===\" && openssl rsa -in /app/ssl/server.key -noout -modulus | openssl md5 && echo \"=== Cert Modulus ===\" && openssl x509 -in /app/ssl/server.crt -noout -modulus | openssl md5","description":"Verify key and certificate match"}

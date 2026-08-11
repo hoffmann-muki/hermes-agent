@@ -1,0 +1,1 @@
+Now let me verify the fix works by testing that a trailing newline is rejected, and that valid usernames still pass:

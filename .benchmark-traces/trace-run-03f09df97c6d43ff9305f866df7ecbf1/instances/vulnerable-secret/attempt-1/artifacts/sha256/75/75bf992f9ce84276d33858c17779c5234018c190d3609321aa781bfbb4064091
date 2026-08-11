@@ -1,0 +1,1 @@
+{"command":"file /app/* 2>/dev/null"}

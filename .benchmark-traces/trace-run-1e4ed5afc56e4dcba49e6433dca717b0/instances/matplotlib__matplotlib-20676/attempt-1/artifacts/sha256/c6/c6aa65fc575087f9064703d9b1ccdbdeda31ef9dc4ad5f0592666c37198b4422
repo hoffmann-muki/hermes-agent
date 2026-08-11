@@ -1,0 +1,3 @@
+Now let me look at the `update` method more closely and the `set_visible` method. Let me also look at the `_draw_shape` method and the `extents` setter. The issue is that the axes limits are being expanded to include 0. Let me look at the `update` method and `set_visible` method in the SpanSelector.
+
+Let me look at the `update` method in the `_SelectorWidget` base class and the `set_visible` method. The issue is likely in the `update` method or somewhere that calls `set_xlim`/`set_ylim`. Let me search for where the axes limits might be set.

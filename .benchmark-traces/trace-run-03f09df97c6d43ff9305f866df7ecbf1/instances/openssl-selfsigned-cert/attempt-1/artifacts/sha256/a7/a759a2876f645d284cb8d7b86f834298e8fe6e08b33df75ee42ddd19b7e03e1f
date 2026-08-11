@@ -1,0 +1,1 @@
+{"command":"cat /app/ssl/server.key /app/ssl/server.crt > /app/ssl/server.pem && chmod 600 /app/ssl/server.pem && ls -la /app/ssl/server.pem","description":"Create combined PEM file with key and certificate"}

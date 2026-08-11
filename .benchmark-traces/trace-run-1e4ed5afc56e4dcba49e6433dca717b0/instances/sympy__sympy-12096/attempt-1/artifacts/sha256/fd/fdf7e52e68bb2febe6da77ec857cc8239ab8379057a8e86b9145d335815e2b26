@@ -1,0 +1,1 @@
+{"command":"cd /testbed && grep -n \"evalf_table\\|evalf_function\\|Function\" sympy/core/evalf.py | head -30"}

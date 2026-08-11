@@ -1,0 +1,1 @@
+Now I understand the issue. The `_imp_` returns a SymPy expression. When it's a simple value, `Float(...)` works. But when it's another unevaluated `Function` (like `g(2)`), `Float(g(2), prec)` doesn't recursively evaluate it. Let me look at how `evalf` works on expressions.

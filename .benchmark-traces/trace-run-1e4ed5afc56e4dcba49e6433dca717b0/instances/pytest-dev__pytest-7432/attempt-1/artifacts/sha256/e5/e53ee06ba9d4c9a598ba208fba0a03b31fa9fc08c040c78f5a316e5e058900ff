@@ -1,0 +1,1 @@
+Looking at the issue, I need to examine the `pytest_runtest_makereport` hook in `skipping.py` to understand why `--runxfail` breaks skip location reporting.

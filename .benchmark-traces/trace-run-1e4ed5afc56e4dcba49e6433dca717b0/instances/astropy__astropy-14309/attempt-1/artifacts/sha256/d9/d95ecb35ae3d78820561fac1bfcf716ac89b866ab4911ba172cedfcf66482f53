@@ -1,0 +1,1 @@
+Reproduced. Now let me fix the `is_fits` function. The fix should restore the original behavior where the `isinstance(args[0], ...)` check is only reached when `filepath is None` (or doesn't match), and handle the case where `args` is empty.

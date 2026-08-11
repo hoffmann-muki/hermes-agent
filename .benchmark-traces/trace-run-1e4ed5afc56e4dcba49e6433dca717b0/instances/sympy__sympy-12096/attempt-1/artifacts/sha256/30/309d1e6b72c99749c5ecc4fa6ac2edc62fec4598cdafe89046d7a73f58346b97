@@ -1,0 +1,15 @@
+So `_eval_evalf` returns an expression. The current code returns `Float(self._imp_(*self.args), prec)`. The issue is that when `_imp_` returns an expression with unevaluated functions, `Float(...)` fails.
+
+The fix should call `evalf` recursively on the result of `_imp_`. Let me think about the best approach. The `_imp_` returns a SymPy expression. We want to evalf it. The cleanest way is to call `.evalf()` on the result, but that uses default precision. We need to use the `prec` parameter.
+
+Looking at the `evalf` function in evalf.py, it takes `(x, prec, options)`. But there's also the `EvalfMixin.evalf` method which takes `n` (digits). 
+
+Let me look at how to properly evalf an expression with a given precision. The `_eval_evalf` is called from `evalf` (the module function) at line 1284, and the result is then processed. So if `_eval_evalf` returns the result of calling `evalf` on the `_imp_` result, that would be recursive.
+
+Actually, the simplest and most correct fix: call `evalf` on the result of `_imp_`. Let me check what `evalf` (the module function) returns vs what `_eval_evalf` should return.
+
+Looking at line 1284-1300: `xe = x._eval_evalf(prec)` returns an expression, then `re, im = xe.as_real_imag()`. So `_eval_evalf` must return an expression.
+
+The module-level `evalf` function returns a tuple `(re, im, re_acc, im_acc)`. So we can't directly return that.
+
+But there's `EvalfMixin.evalf` (the method) which returns an expression. Let me check:

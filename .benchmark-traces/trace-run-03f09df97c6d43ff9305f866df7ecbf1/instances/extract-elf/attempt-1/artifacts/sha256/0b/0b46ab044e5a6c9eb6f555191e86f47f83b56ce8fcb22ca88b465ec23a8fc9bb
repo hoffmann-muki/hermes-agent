@@ -1,0 +1,1 @@
+{"command":"readelf -x .interp /app/a.out && readelf -x .comment /app/a.out"}

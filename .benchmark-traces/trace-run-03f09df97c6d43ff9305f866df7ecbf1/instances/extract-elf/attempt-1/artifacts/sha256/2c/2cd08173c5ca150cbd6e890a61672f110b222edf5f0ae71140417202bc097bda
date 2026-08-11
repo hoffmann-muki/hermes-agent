@@ -1,0 +1,1 @@
+{"command":"readelf -x .strtab /app/a.out && readelf -x .shstrtab /app/a.out"}

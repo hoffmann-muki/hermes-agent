@@ -1,0 +1,1 @@
+The test runner uses `test_sqlite` as the default settings module. Let me run the auth validator tests:

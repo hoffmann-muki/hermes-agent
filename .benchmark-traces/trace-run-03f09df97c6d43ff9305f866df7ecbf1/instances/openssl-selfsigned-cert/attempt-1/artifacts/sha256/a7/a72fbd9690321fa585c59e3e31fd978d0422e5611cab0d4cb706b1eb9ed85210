@@ -1,0 +1,1 @@
+{"command":"chmod +x /app/check_cert.py && python3 /app/check_cert.py","description":"Make script executable and run certificate verification"}

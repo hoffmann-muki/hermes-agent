@@ -1,0 +1,1 @@
+{"command":"grep -rn \"_imp_\" /testbed/sympy/core/function.py | head -50"}

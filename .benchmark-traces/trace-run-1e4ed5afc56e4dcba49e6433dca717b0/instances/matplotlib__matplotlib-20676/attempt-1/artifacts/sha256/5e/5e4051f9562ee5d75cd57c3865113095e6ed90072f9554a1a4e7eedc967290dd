@@ -1,0 +1,1 @@
+{"command":"sed -n '1862,1990p' /testbed/lib/matplotlib/widgets.py","workdir":"/testbed"}

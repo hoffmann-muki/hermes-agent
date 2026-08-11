@@ -1,0 +1,1 @@
+{"command":"grep -n \"class SpanSelector\\|def __init__\\|def _update\\|def _release\\|def _motion\\|def _draw\\|def _interactive\\|span_stays\\|interactive\\|set_xlim\\|set_ylim\\|update_limits\\|self.ax\\|self.to_select\\|self._selection\\|self._interactive\" /testbed/lib/matplotlib/widgets.py | sed -n '1,200p'","workdir":"/testbed"}

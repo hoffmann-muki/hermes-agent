@@ -1,0 +1,1 @@
+{"command":"readelf -x .dynsym /app/a.out && readelf -x .dynstr /app/a.out && readelf -x .gnu.version /app/a.out && readelf -x .gnu.version_r /app/a.out && readelf -x .gnu.hash /app/a.out"}

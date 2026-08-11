@@ -1,0 +1,1 @@
+I've reproduced the issue. Now let me understand the problem. The `_imp_` returns a SymPy expression (e.g., `g(2)` which is `4`), but when it's a composition, `_imp_` returns another `Function` object that needs to be evaluated recursively. Let me look at the code more carefully.

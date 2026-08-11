@@ -1,0 +1,1 @@
+{"command":"readelf -x .rodata /app/a.out && readelf -x .data /app/a.out && readelf -x .dynamic /app/a.out && readelf -x .got /app/a.out"}

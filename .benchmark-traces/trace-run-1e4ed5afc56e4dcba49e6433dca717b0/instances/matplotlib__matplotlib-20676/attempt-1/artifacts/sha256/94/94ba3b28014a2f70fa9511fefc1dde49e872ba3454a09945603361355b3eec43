@@ -1,0 +1,1 @@
+Let me trace through the init step by step. The issue is in the `extents` setter which calls `update()`. Let me look at the `extents` setter and the `_draw_shape` method. The `extents` setter calls `self.update()` which calls `draw_idle()`. But the issue is the limits change during init. Let me add some tracing.

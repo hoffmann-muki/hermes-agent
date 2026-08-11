@@ -1,0 +1,12 @@
+I've reproduced the issue. Now let me analyze the bug.
+
+Looking at the `pytest_runtest_makereport` hook:
+
+```python
+elif item.config.option.runxfail:
+    pass  # don't interfere
+```
+
+When `--runxfail` is set, the hook does `pass` (doesn't interfere), which means the skip location-fixing logic at the bottom (lines 294-305) is never reached. That location-fixing logic is what changes the skip location from `src/_pytest/skipping.py:239` to the item's definition location.
+
+The fix: the `runxfail` br

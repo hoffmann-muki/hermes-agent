@@ -1,0 +1,1 @@
+{"command":"readelf -x .note.gnu.property /app/a.out && readelf -x .note.gnu.build-id /app/a.out && readelf -x .note.ABI-tag /app/a.out"}

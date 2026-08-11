@@ -1,0 +1,1 @@
+Now I understand the issue. The `_imp_` returns a SymPy expression `g(2)**2` which contains an unevaluated function `g(2)`. `Float(g(2)**2, prec)` fails because `g(2)` is not a number. Let me check how the evalf_table handles Function:

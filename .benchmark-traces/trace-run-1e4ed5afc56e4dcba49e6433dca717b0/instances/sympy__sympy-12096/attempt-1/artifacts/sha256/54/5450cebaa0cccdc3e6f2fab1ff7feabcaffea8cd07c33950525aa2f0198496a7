@@ -1,0 +1,8 @@
+Now let me understand the flow. When `f(g(2)).evalf()` is called:
+1. `evalf` is called on `f(g(2))`
+2. `evalf_table` doesn't have `f` (it's an implemented function), so it falls back to `_eval_evalf`
+3. In `_eval_evalf`, `mpmath` doesn't have `f`, so it tries `Float(self._imp_(*self.args), prec)`
+4. `self._imp_(g(2))` returns `g(2)**2` (a Pow expression containing unevaluated `g(2)`)
+5. `Float(g(2)**2, prec)` fails because `g(2)` is not a number
+
+The fix should call `evalf` recursively on the re

@@ -1,0 +1,1 @@
+{"command":"objdump -s -j .rela.dyn /app/a.out && objdump -s -j .rela.plt /app/a.out"}

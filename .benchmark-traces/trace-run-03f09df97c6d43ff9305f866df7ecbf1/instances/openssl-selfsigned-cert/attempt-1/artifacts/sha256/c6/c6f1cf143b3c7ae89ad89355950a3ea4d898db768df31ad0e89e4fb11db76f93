@@ -1,0 +1,1 @@
+{"output": "Certificate file found: /app/ssl/server.crt\nCertificate loaded successfully.\nWARNING: Could not extract Common Name.\nExpiration Date: 2027-08-11\nCertificate verification successful", "exit_code": 0, "error": null}

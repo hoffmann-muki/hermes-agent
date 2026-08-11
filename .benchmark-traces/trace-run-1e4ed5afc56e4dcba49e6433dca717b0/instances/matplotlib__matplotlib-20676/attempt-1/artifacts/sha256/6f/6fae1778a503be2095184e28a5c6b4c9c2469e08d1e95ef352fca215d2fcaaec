@@ -1,0 +1,1 @@
+{"total_count": 1, "matches": [{"path": "/testbed/lib/matplotlib/widgets.py", "line": 1991, "content": "class SpanSelector(_SelectorWidget):"}]}

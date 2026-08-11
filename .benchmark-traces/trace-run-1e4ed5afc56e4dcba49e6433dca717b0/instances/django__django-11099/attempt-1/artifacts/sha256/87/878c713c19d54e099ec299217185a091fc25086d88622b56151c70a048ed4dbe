@@ -1,0 +1,1 @@
+{"command":"cd /testbed && ls tests/*.py | head; echo \"---\"; ls tests/ | grep -i setting","workdir":"/testbed"}

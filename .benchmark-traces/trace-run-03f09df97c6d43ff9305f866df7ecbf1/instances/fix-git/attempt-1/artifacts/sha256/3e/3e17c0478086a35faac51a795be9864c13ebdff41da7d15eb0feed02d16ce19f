@@ -1,0 +1,1 @@
+Now I understand the conflict clearly. The master branch has your old bio as a PhD candidate at UW, while your changes updated it to say you're a Postdoctoral Researcher at Stanford CS. Since your changes represent your current status, I'll resolve the conflict by keeping your updated version.

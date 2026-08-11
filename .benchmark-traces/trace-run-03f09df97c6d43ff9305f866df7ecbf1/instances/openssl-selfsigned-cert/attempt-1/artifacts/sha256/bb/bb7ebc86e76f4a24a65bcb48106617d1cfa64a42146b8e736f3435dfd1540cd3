@@ -1,0 +1,1 @@
+The expiration date is now working, but the Common Name extraction needs fixing. Let me check the actual Subject line format in the certificate text output.

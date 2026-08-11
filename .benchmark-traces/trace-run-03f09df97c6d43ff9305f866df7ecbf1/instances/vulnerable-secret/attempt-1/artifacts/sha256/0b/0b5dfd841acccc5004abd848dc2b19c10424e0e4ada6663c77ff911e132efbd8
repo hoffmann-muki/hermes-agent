@@ -1,0 +1,27 @@
+The secret key has been successfully extracted and saved to `/app/results.txt`.
+
+## Summary
+
+**Analysis of the program:**
+
+1. **Initial exploration**: The binary `/app/vulnerable` is an ELF64 executable. Running it normally just prints "Input processed successfully."
+
+2. **String analysis**: `strings` revealed key strings including:
+   - "Debugging detected! Access denied." — indicating anti-debugging via `ptrace`
+   - "Access granted! Secret: %s" — the format string for the secret
+   - "Authentication bypassed!" — a hint about the intended solution path
+
+3. **Disassembly analysis**: Using `objdump -d`, I found:
+   - The program uses `ptrace` to detect debugging (anti-debugging check)
+   - At `0x401200`, there's a function that calls `ptrace` with `PTRACE_TRACEME` (request `0x11`)
+   - At `0x40122e`, it loads a byte from `0x404060` and compares it to `0x42` ('B')
+   - At `0x401250`, there's a loop that XORs each byte of data at `0x40405f` with `0x42` until it hits a `0x42` byte (sentinel)
+   - The decoded result is then printed via `printf` with the "Access granted! Secret: %s" format
+
+4. **Data extraction**: The encoded data at `.data` section address `0x404060` is:
+   ```
+   04 0e 03 05 39 20 76 24 24 71 30 1d 72 34 71 30 24 2e 72 35 1d 2f 76 31 36 71 30 1d 29 71 3b 1d 70 72 70 76 3f
+   ```
+   XORing each byte with `0x42` decodes to: **`FLAG{b4ff3r_0v3rfl0w_m4st3r_k3y_2024}`**
+
+The flag was written to `/app/results.txt`.

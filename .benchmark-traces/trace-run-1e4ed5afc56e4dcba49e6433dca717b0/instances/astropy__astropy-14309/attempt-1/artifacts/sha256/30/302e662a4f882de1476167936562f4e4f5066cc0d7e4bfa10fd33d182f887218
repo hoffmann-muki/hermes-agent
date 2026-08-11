@@ -1,0 +1,9 @@
+The fix is complete. Here's a summary:
+
+## Summary
+
+### Problem
+The `is_fits` function in `astropy/io/fits/connect.py` was raising an `IndexError: tuple index out of range` when called with a string `filepath` that doesn't have a FITS extension (e.g., `"bububu.ecsv"`) and empty `args` (e.g., `[]`).
+
+### Root Cause
+Commit `2a0c5c6f` refactored the `is_fits` function to use a "return bool condition directly" style. The original code had the `isinstance(args[0], ...)` check inside an `elif` branch 

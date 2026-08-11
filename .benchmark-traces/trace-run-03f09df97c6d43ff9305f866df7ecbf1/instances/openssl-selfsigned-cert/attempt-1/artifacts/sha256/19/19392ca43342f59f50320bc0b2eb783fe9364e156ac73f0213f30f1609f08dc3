@@ -1,0 +1,1 @@
+{"command":"openssl genrsa -out /app/ssl/server.key 2048 && chmod 600 /app/ssl/server.key && ls -la /app/ssl/server.key","description":"Generate 2048-bit RSA private key with 600 permissions"}

@@ -1,0 +1,23 @@
+Now I understand the issue. The commit `2a0c5c6f` changed the logic structure. Let me analyze the original vs. new code:
+
+**Original code:**
+```python
+if fileobj is not None:
+    ...
+    return sig == FITS_SIGNATURE
+elif filepath is not None:
+    if filepath.lower().endswith(...):
+        return True
+elif isinstance(args[0], ...):
+    return True
+else:
+    return False
+```
+
+**New code:**
+```python
+if fileobj is not None:
+    ...
+    return sig == FITS_SIGNATURE
+elif filepath is not None:
+    if 

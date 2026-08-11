@@ -1,0 +1,1 @@
+{"output": "/app/a.out:     file format elf64-x86-64\n\nContents of section .init_array:\n 3db8 40110000 00000000                    @.......        \n\n/app/a.out:     file format elf64-x86-64\n\nContents of section .fini_array:\n 3dc0 00110000 00000000                    ........", "exit_code": 0, "error": null}

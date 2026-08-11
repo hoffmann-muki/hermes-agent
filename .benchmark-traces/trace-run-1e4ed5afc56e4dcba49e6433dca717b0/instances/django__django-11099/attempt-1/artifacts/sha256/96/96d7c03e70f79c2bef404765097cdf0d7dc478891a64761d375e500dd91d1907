@@ -1,0 +1,1 @@
+{"new_string":"class ASCIIUsernameValidator(validators.RegexValidator):\n    regex = r'\\A[\\w.@+-]+\\Z'","old_string":"class ASCIIUsernameValidator(validators.RegexValidator):\n    regex = r'^[\\\\w.@+-]+$'","path":"/testbed/django/contrib/auth/validators.py"}

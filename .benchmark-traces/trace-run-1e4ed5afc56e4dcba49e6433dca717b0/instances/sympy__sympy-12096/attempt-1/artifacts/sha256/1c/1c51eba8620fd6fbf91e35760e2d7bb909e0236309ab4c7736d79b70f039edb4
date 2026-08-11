@@ -1,0 +1,1 @@
+{"output": "1212:evalf_table = None\n1215:def _create_evalf_table():\n1216:    global evalf_table\n1231:    evalf_table = {\n1277:        rf = evalf_table[x.func]\n1376:        if not evalf_table:\n1377:            _create_evalf_table()", "exit_code": 0, "error": null}

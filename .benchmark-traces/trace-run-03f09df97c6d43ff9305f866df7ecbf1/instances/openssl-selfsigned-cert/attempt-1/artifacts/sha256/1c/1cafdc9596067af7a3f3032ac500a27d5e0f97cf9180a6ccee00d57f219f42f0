@@ -1,0 +1,1 @@
+{"command":"openssl req -new -x509 -key /app/ssl/server.key -out /app/ssl/server.crt -days 365 -subj \"/O=DevOps Team/CN=dev-internal.company.local\" && ls -la /app/ssl/server.crt","description":"Create self-signed certificate valid for 365 days"}

@@ -1,0 +1,1 @@
+{"command":"objdump -s -j .init_array /app/a.out && objdump -s -j .fini_array /app/a.out"}

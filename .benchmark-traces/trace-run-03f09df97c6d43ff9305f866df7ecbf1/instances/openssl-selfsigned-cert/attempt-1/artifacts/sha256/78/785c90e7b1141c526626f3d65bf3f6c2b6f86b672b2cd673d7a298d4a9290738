@@ -1,0 +1,28 @@
+The key and certificate moduli match, confirming they are a valid pair. Everything is complete. Here's a summary of what was accomplished:
+
+## Summary
+
+### Files Created
+
+1. **`/app/ssl/server.key`** — 2048-bit RSA private key with permissions `600` (owner read/write only)
+
+2. **`/app/ssl/server.crt`** — Self-signed certificate valid for 365 days with:
+   - Organization Name: "DevOps Team"
+   - Common Name: "dev-internal.company.local"
+   - Validity: Aug 11, 2026 → Aug 11, 2027
+
+3. **`/app/ssl/server.pem`** — Combined PEM file containing both the private key and certificate (permissions `600`)
+
+4. **`/app/ssl/verification.txt`** — Contains the certificate's subject, validity dates, and SHA-256 fingerprint
+
+5. **`/app/check_cert.py`** — Python script that:
+   - Verifies the certificate file exists and can be loaded
+   - Prints the Common Name (`dev-internal.company.local`)
+   - Prints the expiration date in YYYY-MM-DD format (`2027-08-11`)
+   - Prints "Certificate verification successful" when all checks pass
+
+### Verification Results
+- ✅ Private key has `600` permissions
+- ✅ Certificate and key moduli match (valid pair)
+- ✅ PEM file contains both key and certificate (2 BEGIN/END blocks)
+- ✅ Python script runs successfully and outputs all required details

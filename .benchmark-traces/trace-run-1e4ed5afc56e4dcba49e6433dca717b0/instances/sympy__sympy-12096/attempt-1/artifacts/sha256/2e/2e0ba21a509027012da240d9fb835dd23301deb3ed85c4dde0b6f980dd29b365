@@ -1,0 +1,5 @@
+Now I understand the full picture. The `_imp_` returns a SymPy expression. When it's a plain number, `Float(...)` works. But when it contains unevaluated functions (composition), `Float(...)` fails.
+
+The fix: instead of `Float(self._imp_(*self.args), prec)`, we should call `evalf` recursively on the result. Let me look at how the result is used. The `_eval_evalf` should return a value that can be processed by the `evalf` machinery.
+
+Let me look at how the result of `_eval_evalf` is used in the `

@@ -1,0 +1,1 @@
+I can see the issue! Looking at the git reflog, your changes were committed as `c499730` with the message "Move to Stanford". When you checked out master (at `d7d3e4b`), you lost those changes. Let me investigate further to understand the full picture.

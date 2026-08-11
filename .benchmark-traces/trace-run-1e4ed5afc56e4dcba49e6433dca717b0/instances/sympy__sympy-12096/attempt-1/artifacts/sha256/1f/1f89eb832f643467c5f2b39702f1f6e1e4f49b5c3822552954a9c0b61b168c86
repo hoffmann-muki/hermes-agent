@@ -1,0 +1,1 @@
+{"command":"cd /testbed && python -c \"\nfrom sympy.utilities.lambdify import implemented_function\nf = implemented_function('f', lambda x: x ** 2)\ng = implemented_function('g', lambda x: 2 * x)\nprint(f(2).evalf())\nprint(g(2).evalf())\nprint(f(g(2)).evalf())\n\""}

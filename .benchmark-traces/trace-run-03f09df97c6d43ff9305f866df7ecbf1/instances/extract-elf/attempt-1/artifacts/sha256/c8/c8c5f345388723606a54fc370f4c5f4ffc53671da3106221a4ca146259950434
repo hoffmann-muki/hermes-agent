@@ -1,0 +1,1 @@
+{"command":"readelf -x .init_array /app/a.out && readelf -x .fini_array /app/a.out && readelf -x .eh_frame /app/a.out && readelf -x .eh_frame_hdr /app/a.out"}

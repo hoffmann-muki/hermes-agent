@@ -1,0 +1,1 @@
+{"command":"cd /testbed && grep -n \"_imp_\" sympy/utilities/lambdify.py | head -20"}

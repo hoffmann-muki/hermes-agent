@@ -1,0 +1,1 @@
+{"command":"objdump -s -j .rodata /app/vulnerable 2>/dev/null | tail -20"}

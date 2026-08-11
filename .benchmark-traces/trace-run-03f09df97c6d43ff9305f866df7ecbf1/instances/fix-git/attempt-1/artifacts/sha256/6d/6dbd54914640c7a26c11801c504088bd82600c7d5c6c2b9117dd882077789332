@@ -1,0 +1,7 @@
+Now I have a clear picture of what happened:
+
+1. You were on a branch (or detached HEAD) at commit `c4e38a1`
+2. You made changes and committed them as `c499730` with message "Move to Stanford"
+3. You then checked out `master` (which was at `d7d3e4b`), losing access to your commit
+
+Your changes are safe in commit `c499730`. Let me merge them into master now.

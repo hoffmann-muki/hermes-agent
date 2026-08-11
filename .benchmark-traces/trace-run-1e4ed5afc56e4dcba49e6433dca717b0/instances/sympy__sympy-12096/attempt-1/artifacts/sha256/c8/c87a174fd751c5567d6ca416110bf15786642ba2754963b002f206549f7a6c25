@@ -1,0 +1,1 @@
+{"output": "case 1: 4 <class 'sympy.core.numbers.Integer'>\ncase 2: g(2)**2 <class 'sympy.core.power.Pow'>\nFloat int: 4.0000000000000000000000000000000000000000000000000000", "exit_code": 0, "error": null}

@@ -1,0 +1,23 @@
+The fix is complete. Here's a summary:
+
+## Summary
+
+### Problem
+The `is_fits` function in `astropy/io/fits/connect.py` was raising an `IndexError: tuple index out of range` when called with a string `filepath` that doesn't have a FITS extension (e.g., `"bububu.ecsv"`) and empty `args` (e.g., `[]`).
+
+### Root Cause
+Commit `2a0c5c6f` refactored the `is_fits` function to use a "return bool condition directly" style. The original code had the `isinstance(args[0], ...)` check inside an `elif` branch that was only reached when `filepath is None`. The refactored code moved `return isinstance(args[0], ...)` to the end of the function as an unconditional return, meaning it would be reached whenever `filepath` didn't end with a FITS extension — even when `args` was empty, causing the `IndexError`.
+
+### Fix
+Restored the original control flow structure: the `isinstance(args[0], ...)` check is now in an `elif` branch (only reached when `filepath is None`), and added a guard `args and` to safely handle the case where `args` is empty. The final `return False` preserves the original behavior of returning `False` when none of the conditions match.
+
+### Changed Files
+- `astropy/io/fits/connect.py` — Fixed the `is_fits` function's control flow.
+
+### Verification
+- Reproduced the original `IndexError` before the fix.
+- Confirmed the fix resolves the issue with multiple test cases (ecsv filepath, fits filepath, HDUList in args, None filepath with empty args).
+- Ran `astropy/io/fits/tests/test_connect.py` (141 passed, 8 skipped, 5 xfailed) and `astropy/io/registry/tests/` (231 passed, 14 skipped) — all pass.
+
+### Residual Risk
+Minimal. The fix restores the pre-refactor behavior while adding a defensive guard against empty `args`, making the function more robust than before.

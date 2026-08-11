@@ -1,0 +1,1 @@
+Now I'll update both regex patterns to use `\A` and `\Z` instead of `^` and `$`:

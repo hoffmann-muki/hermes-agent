@@ -1,0 +1,33 @@
+{
+  "captureTls": true,
+  "containerTls": {
+    "active": true,
+    "binaryPath": "/proc/287539/root/root/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11",
+    "requested": true
+  },
+  "correlation": {
+    "attempt": 1,
+    "benchmark": "terminal-bench-2.1",
+    "framework": "hermes",
+    "instanceId": "vulnerable-secret",
+    "runId": "trace-run-03f09df97c6d43ff9305f866df7ecbf1"
+  },
+  "hostPid": null,
+  "hostPrivilege": null,
+  "hostTls": {
+    "active": false,
+    "requested": false
+  },
+  "image": "agentsight:play",
+  "imageId": "sha256:a4e394353e6944f94815de2d624af996fe87f002aa78fcd8fc17cd2688b059df",
+  "profileId": "agentsight-f98c9395ececc6096bea31c316c41221",
+  "schema": "benchmark-agentsight-profile/v1",
+  "sourceScopes": [
+    "task-container"
+  ],
+  "startedAt": "2026-08-11T00:55:50.459710+00:00",
+  "status": "completed",
+  "targetContainer": "1fb514db55b9",
+  "topology": "docker-pid-host-sidecar",
+  "updatedAt": "2026-08-11T00:58:25.777149+00:00"
+}

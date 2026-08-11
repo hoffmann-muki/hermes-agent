@@ -1,0 +1,8 @@
+Everything is merged successfully. Here's a summary of what happened and what I did:
+
+## What Happened
+Your changes were committed as `c499730` with the message "Move to Stanford", but when you checked out `master` (at `d7d3e4b`), those changes became unreachable from the current branch. They weren't lost — just orphaned.
+
+## What I Did
+1. **Found your changes** using `git reflog`, which showed commit `c499730` ("Move to Stanford")
+2. **Merged your changes** into master with `git merge c499730`

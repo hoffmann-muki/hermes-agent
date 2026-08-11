@@ -1,0 +1,1 @@
+{"output": "Auto-merging _includes/about.md\nCONFLICT (content): Merge conflict in _includes/about.md\nAutomatic merge failed; fix conflicts and then commit the result.", "exit_code": 1, "error": null, "exit_code_meaning": "Non-zero exit (often normal — e.g. 'git diff' returns 1 when files differ)"}

@@ -1,0 +1,1 @@
+`axvline` doesn't change the limits. Let me trace more carefully. Let me check the `extents` property and the `_setup_edge_handle` method. The `extents` property is called in `_setup_edge_handle` via `self.extents`. Let me check.

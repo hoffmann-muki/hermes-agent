@@ -1,0 +1,1 @@
+{"command":"git add _includes/about.md _layouts/default.html && git commit -m \"Merge 'Move to Stanford' changes into master\"","workdir":"/app/personal-site"}

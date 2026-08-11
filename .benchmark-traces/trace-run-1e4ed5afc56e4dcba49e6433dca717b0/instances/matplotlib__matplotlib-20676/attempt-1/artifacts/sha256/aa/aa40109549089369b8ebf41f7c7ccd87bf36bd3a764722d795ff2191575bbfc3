@@ -1,0 +1,1 @@
+I've reproduced the issue. The xlimits are expanded to include 0 (actually -1). Let me investigate where this happens. The issue is likely in the `ToolLineHandles` creation, which uses `ax.axvline`/`ax.axhline`. Let me check.

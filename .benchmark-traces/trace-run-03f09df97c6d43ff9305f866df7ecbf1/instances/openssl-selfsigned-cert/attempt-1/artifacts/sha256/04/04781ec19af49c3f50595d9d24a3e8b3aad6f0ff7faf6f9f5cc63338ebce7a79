@@ -1,0 +1,1 @@
+{"command":"openssl x509 -in /app/ssl/server.crt -noout -text | grep -i \"subject:\"","description":"Check Subject line format in certificate"}

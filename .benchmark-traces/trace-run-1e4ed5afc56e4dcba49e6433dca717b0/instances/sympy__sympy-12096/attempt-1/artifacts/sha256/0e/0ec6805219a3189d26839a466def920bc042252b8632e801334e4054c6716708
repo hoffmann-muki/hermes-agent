@@ -1,0 +1,1 @@
+{"command":"cd /testbed && grep -n \"_eval_evalf\" sympy/functions/elementary/exponential.py | head -10"}

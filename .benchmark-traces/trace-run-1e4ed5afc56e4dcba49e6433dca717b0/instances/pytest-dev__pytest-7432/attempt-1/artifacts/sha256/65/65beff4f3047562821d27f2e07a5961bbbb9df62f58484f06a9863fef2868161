@@ -1,0 +1,1 @@
+{"command":"cd /testbed && cat > /tmp/test_skip_location.py << 'EOF'\nimport pytest\n\n@pytest.mark.skip\ndef test_skip_location() -> None:\n    assert 0\nEOF\npython -m pytest /tmp/test_skip_location.py -rs 2>&1 | tail -20\necho \"=== WITH --runxfail ===\"\npython -m pytest /tmp/test_skip_location.py -rs --runxfail 2>&1 | tail -20"}

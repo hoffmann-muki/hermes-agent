@@ -1,0 +1,1 @@
+{"command":"objdump -d /app/a.out"}

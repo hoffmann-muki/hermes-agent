@@ -1,0 +1,1 @@
+{"output": "Test 1 (ecsv filepath, empty args): ['ascii.ecsv']\nTest 2 (fits filepath): ['fits']\nTest 3 (HDUList in args): ['fits']\nTest 4 (None filepath, empty args): []", "exit_code": 0, "error": null}

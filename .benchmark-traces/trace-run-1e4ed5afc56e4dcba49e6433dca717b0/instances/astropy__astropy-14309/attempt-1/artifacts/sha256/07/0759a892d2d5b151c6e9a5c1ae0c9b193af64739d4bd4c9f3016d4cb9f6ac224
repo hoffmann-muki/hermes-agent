@@ -1,0 +1,30 @@
+Now I understand the issue. The commit `2a0c5c6f` changed the logic structure. Let me analyze the original vs. new code:
+
+**Original code:**
+```python
+if fileobj is not None:
+    ...
+    return sig == FITS_SIGNATURE
+elif filepath is not None:
+    if filepath.lower().endswith(...):
+        return True
+elif isinstance(args[0], ...):
+    return True
+else:
+    return False
+```
+
+**New code:**
+```python
+if fileobj is not None:
+    ...
+    return sig == FITS_SIGNATURE
+elif filepath is not None:
+    if filepath.lower().endswith(...):
+        return True
+return isinstance(args[0], ...)
+```
+
+The problem: In the original, the `isinstance(args[0], ...)` check was in an `elif` that was only reached when `filepath is None`. In the new code, `return isinstance(args[0], ...)` is reached whenever `filepath` doesn't end with a FITS extension (e.g., `"bububu.ecsv"`), but `args` is empty (`[]`), causing the `IndexError`.
+
+Let me verify the reproduction first:

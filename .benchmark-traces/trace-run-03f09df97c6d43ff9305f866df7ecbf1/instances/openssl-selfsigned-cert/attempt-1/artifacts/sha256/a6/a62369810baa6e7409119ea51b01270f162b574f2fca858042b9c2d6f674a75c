@@ -1,0 +1,1 @@
+I see — the Subject line uses `O = DevOps Team, CN = dev-internal.company.local` format (comma-separated, not slash-separated). Let me fix the Common Name extraction.

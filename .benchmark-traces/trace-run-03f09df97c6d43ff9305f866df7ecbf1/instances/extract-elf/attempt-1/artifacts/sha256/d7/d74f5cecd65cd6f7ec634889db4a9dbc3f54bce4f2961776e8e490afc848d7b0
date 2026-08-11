@@ -1,0 +1,1 @@
+{"command":"readelf -h /app/a.out 2>/dev/null || objdump -f /app/a.out 2>/dev/null || echo \"No tools available\""}

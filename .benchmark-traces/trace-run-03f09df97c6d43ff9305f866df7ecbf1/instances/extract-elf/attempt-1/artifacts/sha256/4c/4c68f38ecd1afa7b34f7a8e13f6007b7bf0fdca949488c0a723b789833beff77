@@ -1,0 +1,1 @@
+{"command":"readelf -x .plt /app/a.out && readelf -x .plt.got /app/a.out && readelf -x .plt.sec /app/a.out && readelf -x .init /app/a.out && readelf -x .fini /app/a.out"}

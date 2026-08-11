@@ -1,0 +1,1 @@
+{"output": "ASCIIUsernameValidator valid OK\nASCIIUsernameValidator trailing newline rejected OK\nUnicodeUsernameValidator valid OK\nUnicodeUsernameValidator trailing newline rejected OK", "exit_code": 0, "error": null}

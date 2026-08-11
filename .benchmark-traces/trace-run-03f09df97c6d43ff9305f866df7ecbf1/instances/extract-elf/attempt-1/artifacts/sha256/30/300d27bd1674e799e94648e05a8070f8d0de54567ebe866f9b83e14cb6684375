@@ -1,0 +1,1 @@
+{"command":"objdump -s -j .eh_frame /app/a.out && objdump -s -j .eh_frame_hdr /app/a.out"}

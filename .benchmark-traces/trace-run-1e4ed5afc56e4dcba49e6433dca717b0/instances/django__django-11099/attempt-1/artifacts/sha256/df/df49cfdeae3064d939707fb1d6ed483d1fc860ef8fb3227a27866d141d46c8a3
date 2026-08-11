@@ -1,0 +1,1 @@
+{"command":"cd /testbed && DJANGO_SETTINGS_MODULE=tests.test_settings python -m django test auth_tests.test_validators -v 1 2>&1 | tail -20","workdir":"/testbed"}

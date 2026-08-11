@@ -1,0 +1,27 @@
+{
+  "captureTls": true,
+  "containerTls": {
+    "active": false,
+    "requested": false
+  },
+  "hostPid": 271445,
+  "hostPrivilege": "sudo-password-file",
+  "hostTls": {
+    "active": true,
+    "binaryPath": "/home/hoffmann_muki/.local/share/uv/python/cpython-3.13.14-linux-x86_64-gnu/bin/python3.13",
+    "requested": true
+  },
+  "image": "agentsight:play",
+  "imageId": "sha256:a4e394353e6944f94815de2d624af996fe87f002aa78fcd8fc17cd2688b059df",
+  "profileId": "trace-db58b37929494dacbe0f59dd5f87eaa0",
+  "schema": "benchmark-agentsight-profile/v1",
+  "sourceScopes": [
+    "host",
+    "task-container"
+  ],
+  "startedAt": "2026-08-11T00:06:39.329174+00:00",
+  "status": "completed",
+  "targetContainer": "658f88439709934ea20ac83ef8f6dca93319f59bc1c395e8ae75cf1c4dea7dba",
+  "topology": "host-process-plus-docker-pid-host-sidecar",
+  "updatedAt": "2026-08-11T00:21:42.295778+00:00"
+}

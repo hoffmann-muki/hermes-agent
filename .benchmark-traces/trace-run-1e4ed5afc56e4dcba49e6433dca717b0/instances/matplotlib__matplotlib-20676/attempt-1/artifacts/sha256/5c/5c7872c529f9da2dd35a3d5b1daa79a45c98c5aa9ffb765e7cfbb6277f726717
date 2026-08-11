@@ -1,0 +1,3 @@
+Now let me look at the `update` method in the `_SelectorWidget` base class (line 1862) and the `set_visible` method (line 1984). The issue is likely in the `update` method which calls `draw_idle()`. Let me look at the `update` method and the `set_visible` method more carefully.
+
+Let me look at the `update` method and the `set_visible` method in the `_SelectorWidget` base class.

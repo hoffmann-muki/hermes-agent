@@ -1,0 +1,1 @@
+{"command":"cd /testbed && git show 2a0c5c6f5b982a76615c544854cd6e7d35c67c7f -- astropy/io/fits/connect.py 2>/dev/null | head -100"}

@@ -1,0 +1,1 @@
+{"command":"cd /testbed && grep -n \"def evalf\\|def _eval_evalf\\|def _evalf\" sympy/core/expr.py | head -20"}
